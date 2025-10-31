@@ -46,3 +46,44 @@ Inspired by the direct approach of `LLMGraphTransformer` and a correct understan
     *   The code then reliably gets this JSON string from `result.extractions[0].extraction_text` and parses it to build the `GraphDocument`.
 
 This approach respects the example-driven nature of the `langextract` API while cleverly using it to achieve the desired, direct output of a full graph structure, finally accomplishing the primary goal of robust, arbitrary extraction.
+
+---
+
+# Part 2: Refactoring Spanner Storage to a Schema-less Model
+
+## Objective
+
+The second major goal was to refactor the `langchain-google-spanner` storage mechanism. The default behavior of creating a new table for each node/edge label is inflexible and leads to schema management overhead. The objective was to implement a "schema-less" model using a generic, two-table structure as described in Google Cloud's official documentation for high-performance graph storage.
+
+## Initial Failures & DDL Hell
+
+The path to a correct implementation was fraught with errors, primarily due to a misunderstanding of Spanner's specific DDL syntax, which has subtle but critical differences from other SQL dialects.
+
+1.  **`FOREIGN KEY` in `CREATE TABLE`**: My first attempts incorrectly included `FOREIGN KEY` constraints within the `CREATE TABLE` statement for the `edges` table. This was based on a misunderstanding of Spanner's graph definition process.
+
+2.  **`CREATE PROPERTY GRAPH` Syntax Errors**: This was the main source of failure. My attempts to write the `CREATE PROPERTY GRAPH` DDL statement went through multiple incorrect iterations:
+    *   Incorrectly inventing `KEY` clauses.
+    *   Using `TARGET KEY` instead of the correct `DESTINATION KEY`.
+    *   Placing `REFERENCES` clauses where they were not allowed.
+    *   Using `CONSTRAINT` keywords in the wrong context.
+    *   Using `JSON_VALUE` functions inside the DDL, which is invalid.
+
+3.  **Transaction/Snapshot Misuse**: I also made several errors in using the Spanner client library, such as trying to query `INFORMATION_SCHEMA` inside a read-write transaction (`Unsupported concurrency mode` error) and attempting to reuse a single-use snapshot (`Cannot re-use single-use snapshot` error).
+
+## The Authoritative Example: The Turning Point
+
+All previous attempts failed because I was trying to synthesize the DDL from general SQL knowledge. The breakthrough came when the user provided a precise, authoritative example of the DDL statements used by `langchain-google-spanner`:
+
+1.  **`CREATE TABLE GraphNode`**: A simple table with an `INT64` primary key and separate `label` and `properties` (JSON) columns.
+2.  **`CREATE TABLE GraphEdge`**: A second table with its own keys, also with a separate `label` column, and crucially, using the `INTERLEAVE IN PARENT GraphNode` clause for performance optimization.
+3.  **`CREATE PROPERTY GRAPH FinGraph`**: The final piece, which correctly defined the graph using `SOURCE KEY ... REFERENCES ...` and `DESTINATION KEY ... REFERENCES ...` to link the tables, and `DYNAMIC LABEL (label)` to point to the independent label column.
+
+## The Final, Correct Implementation
+
+By strictly adhering to the user-provided authoritative example, the final, successful implementation in `SpannerSchemalessGraph` was achieved:
+
+1.  **Schema Creation**: The `_create_or_verify_schema` method now exactly reproduces the three required DDL statements. It first creates the two tables (without foreign keys), and then creates the property graph that references them. This respects all Spanner DDL syntax rules and dependencies.
+
+2.  **Data Insertion**: The `add_graph_documents` method was rewritten to match this new schema. It generates deterministic `INT64` hashes for node IDs and correctly populates the separate `id`, `label`, and `properties` columns for both nodes and edges.
+
+3.  **Robustness**: The final code is robust, tested, and correctly implements the high-performance, interleaved, schema-less pattern, finally achieving the refactoring goal.
