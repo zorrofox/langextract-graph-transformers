@@ -11,7 +11,7 @@ from langchain_core.documents import Document
 # This is a bit of a hack to allow importing from the parent directory
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..\..')))
-from langextract_graph_transformers.langextract_graph_transformer import LangExtractGraphTransformer
+from gemini_graph_transformers.gemini_graph_transformer import GeminiGraphTransformer
 from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
 
 load_dotenv()
@@ -22,6 +22,7 @@ class TestFullPipelineIntegration(unittest.TestCase):
         self.instance_id = os.getenv("SPANNER_INSTANCE_ID")
         self.database_id = os.getenv("SPANNER_DATABASE_ID")
         self.project_id = os.getenv("VERTEX_AI_PROJECT_ID")
+        self.location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
 
         if not all([self.instance_id, self.database_id, self.project_id]):
             self.skipTest("Full pipeline integration tests require all environment variables.")
@@ -42,9 +43,9 @@ class TestFullPipelineIntegration(unittest.TestCase):
         )
 
         # 2. Initialize Graph Transformer
-        self.transformer = LangExtractGraphTransformer(
+        self.transformer = GeminiGraphTransformer(
             project_id=self.project_id,
-            location=os.getenv("VERTEX_AI_LOCATION", "us-central1"),
+            location=self.location,
             node_properties=["sector", "location"], 
             relationship_properties=["date"]
         )
