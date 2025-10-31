@@ -1,0 +1,4 @@
+langextract
+langchain-core
+langchain-community
+python-dotenv
