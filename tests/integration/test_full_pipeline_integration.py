@@ -1,16 +1,16 @@
-
 import unittest
 import os
-import uuid
 import json
 import hashlib
+from google import genai
 from dotenv import load_dotenv
 
 from langchain_core.documents import Document
+from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 
-# This is a bit of a hack to allow importing from the parent directory
+# Correct, cross-platform path joining
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..\..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 from gemini_graph_transformers.gemini_graph_transformer import GeminiGraphTransformer
 from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
 
@@ -19,20 +19,14 @@ load_dotenv()
 class TestFullPipelineIntegration(unittest.TestCase):
 
     def setUp(self):
-        self.instance_id = os.getenv("SPANNER_INSTANCE_ID")
-        self.database_id = os.getenv("SPANNER_DATABASE_ID")
         self.project_id = os.getenv("VERTEX_AI_PROJECT_ID")
         self.location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
+        self.instance_id = os.getenv("SPANNER_INSTANCE_ID")
+        self.database_id = os.getenv("SPANNER_DATABASE_ID")
+        self.node_table = "GraphNode"
+        self.edge_table = "GraphEdge"
+        self.graph_name = "FinGraph"
 
-        if not all([self.instance_id, self.database_id, self.project_id]):
-            self.skipTest("Full pipeline integration tests require all environment variables.")
-        
-        unique_id = str(uuid.uuid4())[:8]
-        self.node_table = f"GraphNode_{unique_id}"
-        self.edge_table = f"GraphEdge_{unique_id}"
-        self.graph_name = f"FinGraph_{unique_id}"
-
-        # 1. Initialize Spanner Graph Storage (creates schema)
         self.graph_store = SpannerSchemalessGraph(
             project_id=self.project_id,
             instance_id=self.instance_id,
@@ -42,7 +36,6 @@ class TestFullPipelineIntegration(unittest.TestCase):
             graph_name=self.graph_name,
         )
 
-        # 2. Initialize Graph Transformer
         self.transformer = GeminiGraphTransformer(
             project_id=self.project_id,
             location=self.location,
@@ -59,25 +52,21 @@ class TestFullPipelineIntegration(unittest.TestCase):
 
     def test_extraction_to_storage_e2e(self):
         """Tests the full pipeline from text -> GraphDocument -> Spanner -> Query."""
-        # Define source text
-        text_content = ("Microsoft, a tech giant headquartered in Redmond, announced its acquisition of Activision Blizzard on January 18, 2022.")
+        text_content = ("In a major tech deal, Microsoft, a software company based in Redmond, "
+                        "officially acquired GitHub for $7.5 billion on October 26, 2018.")
         document = Document(page_content=text_content)
 
-        # 1. Extract graph from text
         graph_documents = self.transformer.process_documents([document])
+        
         self.assertEqual(len(graph_documents), 1)
         self.assertGreater(len(graph_documents[0].nodes), 1)
         self.assertGreater(len(graph_documents[0].relationships), 0)
 
-        # 2. Store the extracted graph in Spanner
         self.graph_store.add_graph_documents(graph_documents)
 
-        # 3. Query the data back from Spanner to verify
-        import time
-        time.sleep(5) # Allow some time for data to be indexed
-
-        # Query for the 'Microsoft' node
         microsoft_id = self._get_int64_hash("Company-Microsoft")
+        github_id = self._get_int64_hash("Product-GitHub")
+
         node_query = f"SELECT label, properties FROM {self.node_table} WHERE id = {microsoft_id}"
         node_result = self.graph_store.query(node_query)
         
@@ -85,21 +74,41 @@ class TestFullPipelineIntegration(unittest.TestCase):
         retrieved_node = node_result[0]
         self.assertEqual(retrieved_node['label'], 'Company')
         retrieved_props = retrieved_node['properties']
-        self.assertIn('prop_location', retrieved_props) # Check if the property was extracted
-        self.assertEqual(retrieved_props['prop_location'], 'Redmond')
+        self.assertIn('location', retrieved_props)
+        self.assertEqual(retrieved_props['location'], 'Redmond')
 
-        # Query for the 'ACQUIRED' relationship
-        activision_id = self._get_int64_hash("Company-Activision Blizzard")
         edge_query = f"""SELECT label, properties FROM {self.edge_table} 
-                        WHERE id = {microsoft_id} AND dest_id = {activision_id}"""
+                        WHERE id = {microsoft_id} AND dest_id = {github_id}"""
         edge_result = self.graph_store.query(edge_query)
 
         self.assertEqual(len(edge_result), 1)
         retrieved_edge = edge_result[0]
         self.assertEqual(retrieved_edge['label'], 'ACQUIRED')
         retrieved_edge_props = retrieved_edge['properties']
-        self.assertIn('prop_date', retrieved_edge_props)
-        self.assertEqual(retrieved_edge_props['prop_date'], 'January 18, 2022')
+        self.assertIn('date', retrieved_edge_props)
+        self.assertEqual(retrieved_edge_props['date'], 'October 26, 2018')
+
+    def test_cleanup_and_readd_race_condition(self):
+        """Tests that the graph can be cleaned up and immediately recreated without race conditions."""
+        doc1 = Document(page_content="First document.")
+        graph_doc1 = GraphDocument(nodes=[Node(id="A", type="Thing")], relationships=[], source=doc1)
+        self.graph_store.add_graph_documents([graph_doc1])
+
+        self.graph_store.cleanup()
+
+        doc2 = Document(page_content="Second document.")
+        graph_doc2 = GraphDocument(nodes=[Node(id="B", type="Thing")], relationships=[], source=doc2)
+        
+        try:
+            self.graph_store.add_graph_documents([graph_doc2])
+        except Exception as e:
+            self.fail(f"add_graph_documents failed unexpectedly after cleanup with error: {e}")
+
+        node_b_id = self._get_int64_hash("Thing-B")
+        node_query = f"SELECT label FROM {self.node_table} WHERE id = {node_b_id}"
+        node_result = self.graph_store.query(node_query)
+        self.assertEqual(len(node_result), 1)
+        self.assertEqual(node_result[0]['label'], 'Thing')
 
 if __name__ == "__main__":
     unittest.main()

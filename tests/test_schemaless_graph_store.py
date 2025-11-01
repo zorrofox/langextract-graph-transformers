@@ -91,5 +91,33 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             self.assertEqual(edge_values[3], 'IS_CEO_OF')
             self.assertEqual(json.loads(edge_values[4])['start_year'], 2015)
 
+    @patch("google.cloud.spanner_v1.Client")
+    def test_add_graph_documents_with_native_types(self, MockSpannerClient):
+        """Tests that native types in properties are passed as dicts, not JSON strings."""
+        mock_client, _, _ = self._get_mock_db(MockSpannerClient)
+        
+        with patch.object(SpannerSchemalessGraph, '_create_or_verify_schema'):
+            graph_store = SpannerSchemalessGraph(
+                instance_id="test-instance", database_id="test-db", client=mock_client
+            )
+
+            node = Node(id="N1", type="Type1", properties={"value": 123, "active": False})
+            graph_doc = GraphDocument(source=Document(page_content=""), nodes=[node], relationships=[])
+
+            mock_transaction = MagicMock()
+            graph_store._database.run_in_transaction = MagicMock(side_effect=lambda func: func(mock_transaction))
+
+            graph_store.add_graph_documents([graph_doc])
+
+            mock_transaction.insert_or_update.assert_called_once()
+            call_kwargs = mock_transaction.insert_or_update.call_args.kwargs
+            
+            # The crucial check: ensure the 'properties' value is a dict, not a string
+            passed_values = call_kwargs['values'][0]
+            properties_value = passed_values[2]
+            self.assertIsInstance(properties_value, str)
+            self.assertEqual(json.loads(properties_value)['value'], 123)
+            self.assertEqual(json.loads(properties_value)['active'], False)
+
 if __name__ == "__main__":
     unittest.main()

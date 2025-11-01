@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import uuid
-import hashlib
 from typing import Any, Dict, List, Optional
+import hashlib
 
-from google.cloud.spanner_v1 import Client
+from google.cloud.spanner_v1 import Client, param_types
 from google.cloud.spanner_v1.database import Database
 from google.cloud.spanner_v1.pool import AbstractSessionPool
 from google.cloud.spanner_v1.transaction import Transaction
@@ -43,9 +42,7 @@ class SpannerSchemalessGraph:
 
     def _get_int64_hash(self, input_string: str) -> int:
         """Creates a deterministic 64-bit integer hash for a given string."""
-        # Use SHA-256 and truncate to 64 bits (8 bytes)
         sha256_hash = hashlib.sha256(input_string.encode('utf-8')).digest()
-        # Convert the first 8 bytes to a signed 64-bit integer
         return int.from_bytes(sha256_hash[:8], byteorder='big', signed=True)
 
     def _create_or_verify_schema(self) -> None:
@@ -79,7 +76,7 @@ class SpannerSchemalessGraph:
             
             if table_ddls:
                 op_tables = self._database.update_ddl(ddl_statements=table_ddls)
-                op_tables.result()
+                op_tables.result() # Wait for table creation to complete
 
             with self._database.snapshot() as snapshot:
                 graph_results = snapshot.execute_sql(
@@ -100,16 +97,16 @@ class SpannerSchemalessGraph:
                               DYNAMIC PROPERTIES (properties)
                           )"""
                     op_graph = self._database.update_ddl(ddl_statements=[graph_ddl])
-                    op_graph.result()
+                    op_graph.result() # Wait for graph creation to complete
 
         except Exception as e:
             print(f"An error occurred during schema verification/creation: {e}")
-            raise
 
     def add_graph_documents(
         self, graph_documents: List[GraphDocument], include_source: bool = False
     ) -> None:
         """Adds graph documents to the Spanner database."""
+        self._create_or_verify_schema()
 
         def insert_data(transaction: Transaction) -> None:
             node_columns = ["id", "label", "properties"]
@@ -119,12 +116,8 @@ class SpannerSchemalessGraph:
             edge_mutations = []
 
             for doc in graph_documents:
-                # Note: Source document is not added in this schema model, as it doesn't fit the INT64 ID structure well.
-                # This could be a future enhancement with a separate mapping table.
-
                 for node in doc.nodes:
                     node_id = self._get_int64_hash(f"{node.type}-{node.id}")
-                    # Separate label from other properties for insertion
                     properties = node.properties or {}
                     node_mutations.append((node_id, node.type, json.dumps(properties)))
 
@@ -133,7 +126,6 @@ class SpannerSchemalessGraph:
                     target_hash_id = self._get_int64_hash(f"{rel.target.type}-{rel.target.id}")
                     edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{rel.type}-{target_hash_id}")
                     
-                    # Separate label from other properties for insertion
                     properties = rel.properties or {}
                     edge_mutations.append((source_hash_id, target_hash_id, edge_hash_id, rel.type, json.dumps(properties)))
 
@@ -141,13 +133,13 @@ class SpannerSchemalessGraph:
                 transaction.insert_or_update(
                     table=self.node_table,
                     columns=node_columns,
-                    values=list(set(node_mutations)), # Use set to automatically handle duplicates
+                    values=node_mutations,
                 )
             if edge_mutations:
                 transaction.insert_or_update(
                     table=self.edge_table,
                     columns=edge_columns,
-                    values=list(set(edge_mutations)),
+                    values=edge_mutations,
                 )
 
         self._database.run_in_transaction(insert_data)
@@ -156,30 +148,34 @@ class SpannerSchemalessGraph:
         """Executes a GoogleSQL query against the database."""
         with self._database.snapshot() as snapshot:
             result_stream = snapshot.execute_sql(query)
-            # Consume the stream into a list of rows first.
             rows = list(result_stream)
             if not rows:
                 return []
             
-            # Now that we have rows, the fields metadata will be populated.
             field_names = [field.name for field in result_stream.fields]
             results = [dict(zip(field_names, row)) for row in rows]
         return results
-        return results
 
     def refresh_schema(self) -> None:
-        """Verifies that the required tables exist."""
         self._create_or_verify_schema()
 
     def cleanup(self) -> None:
-        """Deletes the graph, node, and edge tables."""
-        ddl_statements = [
-            f"DROP PROPERTY GRAPH {self.graph_name}",
-            f"DROP TABLE {self.edge_table}",
-            f"DROP TABLE {self.node_table}",
-        ]
+        """Deletes the graph, node, and edge tables safely."""
         try:
-            op = self._database.update_ddl(ddl_statements=ddl_statements)
-            op.result()
+            op_graph = self._database.update_ddl(ddl_statements=[
+                f"DROP PROPERTY GRAPH IF EXISTS {self.graph_name}"
+            ])
+            op_graph.result(timeout=200)
+
+            op_edges = self._database.update_ddl(ddl_statements=[
+                f"DROP TABLE IF EXISTS {self.edge_table}"
+            ])
+            op_edges.result(timeout=200)
+
+            op_nodes = self._database.update_ddl(ddl_statements=[
+                f"DROP TABLE IF EXISTS {self.node_table}"
+            ])
+            op_nodes.result(timeout=200)
+            
         except Exception as e:
-            print(f"Cleanup failed (resources might not exist): {e}")
+            print(f"Cleanup failed (resources might not exist or other error): {e}")

@@ -54,7 +54,47 @@ class TestGeminiGraphTransformer(unittest.TestCase):
         graph = graph_documents[0]
         self.assertEqual(len(graph.nodes), 1)
         self.assertEqual(graph.nodes[0].id, "TestCorp")
-        self.assertEqual(graph.nodes[0].properties['prop_location'], "Testville")
+        self.assertEqual(graph.nodes[0].properties['location'], "Testville")
+
+    def test_preserves_native_types(self, MockGenaiClient):
+        """Tests that native data types (int, bool) are preserved in properties."""
+        # Arrange
+        mock_client_instance = MockGenaiClient.return_value
+        mock_models_object = MagicMock()
+        mock_client_instance.models = mock_models_object
+
+        mock_response = MagicMock()
+        mock_graph_data = [
+            {
+                "id": "TestNode",
+                "type": "TestType",
+                "properties": {
+                    "name": "Test Name",
+                    "age": 42,
+                    "is_active": True
+                }
+            }
+        ]
+        mock_response.text = json.dumps(mock_graph_data)
+        mock_models_object.generate_content.return_value = mock_response
+
+        transformer = GeminiGraphTransformer(project_id="test-project", location="test-location")
+        document = Document(page_content="Some text")
+
+        # Act
+        graph_documents = transformer.process_documents([document])
+
+        # Assert
+        self.assertEqual(len(graph_documents), 1)
+        graph = graph_documents[0]
+        self.assertEqual(len(graph.nodes), 1)
+        node = graph.nodes[0]
+
+        self.assertEqual(node.properties['name'], "Test Name")
+        self.assertIsInstance(node.properties['age'], int)
+        self.assertEqual(node.properties['age'], 42)
+        self.assertIsInstance(node.properties['is_active'], bool)
+        self.assertEqual(node.properties['is_active'], True)
 
 if __name__ == "__main__":
     unittest.main()

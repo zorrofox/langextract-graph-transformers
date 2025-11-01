@@ -42,7 +42,6 @@ class GeminiGraphTransformer:
         full_prompt = f"{prompt}\n\nText to process:\n---\n{document.page_content}\n---"
 
         try:
-            # Correctly call generate_content on the client, passing the model name as a parameter
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=full_prompt,
@@ -66,7 +65,7 @@ class GeminiGraphTransformer:
                     node = Node(
                         id=node_id,
                         type=item["type"],
-                        properties={f"prop_{str(k).lower()}": str(v) for k, v in item.get("properties", {}).items()}
+                        properties={k: v for k, v in item.get("properties", {}).items()}
                     )
                     nodes.append(node)
                     node_map[node_id] = node
@@ -81,11 +80,12 @@ class GeminiGraphTransformer:
                             source=source_node,
                             target=target_node,
                             type=item["type"],
-                            properties={f"prop_{str(k).lower()}": str(v) for k, v in item.get("properties", {}).items()}
+                            properties={k: v for k, v in item.get("properties", {}).items()}
                         )
                     )
 
-        return GraphDocument(nodes=nodes, relationships=relationships, source=document)
+        graph_document = GraphDocument(nodes=nodes, relationships=relationships, source=document)
+        return graph_document
 
     def _build_prompt(self) -> str:
         """Builds the prompt for the LLM, including property instructions."""
@@ -110,7 +110,8 @@ JSON:
         "id": "Google",
         "type": "Company",
         "properties": {{
-            "sector": "Software"
+            "sector": "Software",
+            "location": "Mountain View"
         }}
     }},
     {{

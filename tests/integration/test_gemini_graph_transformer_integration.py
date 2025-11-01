@@ -49,16 +49,16 @@ class TestGeminiGraphTransformerIntegration(unittest.TestCase):
         self.assertIsNotNone(msft_node, "Microsoft node was not extracted.")
         self.assertIsNotNone(github_node, "GitHub node was not extracted.")
         self.assertEqual(msft_node.type, "Company")
-        self.assertIn("prop_headquarters", msft_node.properties)
-        self.assertEqual(msft_node.properties["prop_headquarters"], "Redmond")
+        self.assertIn("headquarters", msft_node.properties)
+        self.assertEqual(msft_node.properties["headquarters"], "Redmond")
 
         # Find the specific relationship and check its properties
         acquisition_rel = next((r for r in graph.relationships if r.type == "ACQUIRED"), None)
         self.assertIsNotNone(acquisition_rel, "ACQUIRED relationship was not extracted.")
         self.assertEqual(acquisition_rel.source.id, "Microsoft")
         self.assertEqual(acquisition_rel.target.id, "GitHub")
-        self.assertIn("prop_date", acquisition_rel.properties)
-        self.assertEqual(acquisition_rel.properties["prop_date"], "October 26, 2018")
+        self.assertIn("date", acquisition_rel.properties)
+        self.assertEqual(acquisition_rel.properties["date"], "October 26, 2018")
 
 if __name__ == "__main__":
     unittest.main()
