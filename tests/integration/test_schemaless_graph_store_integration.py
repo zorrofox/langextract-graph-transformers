@@ -85,5 +85,39 @@ class TestSchemalessGraphStoreIntegration(unittest.TestCase):
         retrieved_edge_props = retrieved_edge['properties']
         self.assertEqual(retrieved_edge_props['duration_years'], 5)
 
+    def test_add_documents_with_new_options(self):
+        """Tests adding documents with include_source and baseEntityLabel flags."""
+        source_doc = Document(
+            page_content="This is a test source document.",
+            metadata={"author": "Test Runner", "date": "2025-11-01"}
+        )
+        node = Node(id="NodeWithOptions", type="TestNode")
+        graph_doc = GraphDocument(source=source_doc, nodes=[node], relationships=[])
+
+        # Act
+        self.graph.add_graph_documents([graph_doc], include_source=True, baseEntityLabel=True)
+
+        # Allow time for data to be written
+        import time
+        time.sleep(5)
+
+        # Assert
+        node_id = self._get_int64_hash("TestNode-NodeWithOptions")
+        node_query = f"SELECT properties FROM {self.node_table} WHERE id = {node_id}"
+        node_result = self.graph.query(node_query)
+
+        self.assertEqual(len(node_result), 1)
+        retrieved_props = node_result[0]['properties']
+
+        # Verify baseEntityLabel
+        self.assertTrue(retrieved_props.get('baseEntityLabel'))
+
+        # Verify source information
+        self.assertIn('source', retrieved_props)
+        source_props = retrieved_props['source']
+        self.assertEqual(source_props['page_content'], "This is a test source document.")
+        self.assertEqual(source_props['metadata']['author'], "Test Runner")
+        self.assertEqual(source_props['metadata']['date'], "2025-11-01")
+
 if __name__ == "__main__":
     unittest.main()

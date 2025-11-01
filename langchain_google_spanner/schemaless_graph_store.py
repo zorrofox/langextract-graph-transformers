@@ -103,7 +103,10 @@ class SpannerSchemalessGraph:
             print(f"An error occurred during schema verification/creation: {e}")
 
     def add_graph_documents(
-        self, graph_documents: List[GraphDocument], include_source: bool = False
+        self,
+        graph_documents: List[GraphDocument],
+        include_source: bool = False,
+        baseEntityLabel: bool = False,
     ) -> None:
         """Adds graph documents to the Spanner database."""
         self._create_or_verify_schema()
@@ -111,7 +114,7 @@ class SpannerSchemalessGraph:
         def insert_data(transaction: Transaction) -> None:
             node_columns = ["id", "label", "properties"]
             edge_columns = ["id", "dest_id", "edge_id", "label", "properties"]
-            
+
             node_mutations = []
             edge_mutations = []
 
@@ -119,15 +122,36 @@ class SpannerSchemalessGraph:
                 for node in doc.nodes:
                     node_id = self._get_int64_hash(f"{node.type}-{node.id}")
                     properties = node.properties or {}
+                    if baseEntityLabel:
+                        properties["baseEntityLabel"] = True
+                    if include_source:
+                        properties["source"] = {
+                            "page_content": doc.source.page_content,
+                            "metadata": doc.source.metadata,
+                        }
                     node_mutations.append((node_id, node.type, JsonObject(properties)))
 
                 for rel in doc.relationships:
-                    source_hash_id = self._get_int64_hash(f"{rel.source.type}-{rel.source.id}")
-                    target_hash_id = self._get_int64_hash(f"{rel.target.type}-{rel.target.id}")
-                    edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{rel.type}-{target_hash_id}")
-                    
+                    source_hash_id = self._get_int64_hash(
+                        f"{rel.source.type}-{rel.source.id}"
+                    )
+                    target_hash_id = self._get_int64_hash(
+                        f"{rel.target.type}-{rel.target.id}"
+                    )
+                    edge_hash_id = self._get_int64_hash(
+                        f"{source_hash_id}-{rel.type}-{target_hash_id}"
+                    )
+
                     properties = rel.properties or {}
-                    edge_mutations.append((source_hash_id, target_hash_id, edge_hash_id, rel.type, JsonObject(properties)))
+                    edge_mutations.append(
+                        (
+                            source_hash_id,
+                            target_hash_id,
+                            edge_hash_id,
+                            rel.type,
+                            JsonObject(properties),
+                        )
+                    )
 
             if node_mutations:
                 transaction.insert_or_update(

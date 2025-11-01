@@ -1,4 +1,5 @@
 
+
 import unittest
 from unittest.mock import patch, MagicMock, ANY, call
 import json
@@ -10,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
 from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
+from google.cloud.spanner_v1 import JsonObject
 
 class TestSpannerSchemalessGraphStore(unittest.TestCase):
 
@@ -78,7 +80,7 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             google_node_val = next(v for v in values if v[1] == "Company")
             sundar_node_val = next(v for v in values if v[1] == "Person")
 
-            self.assertEqual(json.loads(google_node_val[2])['country'], 'USA')
+            self.assertEqual(google_node_val[2]['country'], 'USA')
 
             # Check edge mutations
             edge_call = mock_transaction.insert_or_update.call_args_list[1]
@@ -89,7 +91,7 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             self.assertEqual(edge_values[0], graph_store._get_int64_hash("Company-Google"))
             self.assertEqual(edge_values[1], graph_store._get_int64_hash("Person-Sundar Pichai"))
             self.assertEqual(edge_values[3], 'IS_CEO_OF')
-            self.assertEqual(json.loads(edge_values[4])['start_year'], 2015)
+            self.assertEqual(edge_values[4]['start_year'], 2015)
 
     @patch("google.cloud.spanner_v1.Client")
     def test_add_graph_documents_with_native_types(self, MockSpannerClient):
@@ -112,12 +114,54 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             mock_transaction.insert_or_update.assert_called_once()
             call_kwargs = mock_transaction.insert_or_update.call_args.kwargs
             
-            # The crucial check: ensure the 'properties' value is a dict, not a string
             passed_values = call_kwargs['values'][0]
             properties_value = passed_values[2]
-            self.assertIsInstance(properties_value, str)
-            self.assertEqual(json.loads(properties_value)['value'], 123)
-            self.assertEqual(json.loads(properties_value)['active'], False)
+            self.assertIsInstance(properties_value, JsonObject)
+            self.assertEqual(properties_value['value'], 123)
+            self.assertEqual(properties_value['active'], False)
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_add_graph_documents_with_new_options(self, MockSpannerClient):
+        """Tests add_graph_documents with include_source and baseEntityLabel flags."""
+        mock_client, _, _ = self._get_mock_db(MockSpannerClient)
+        
+        with patch.object(SpannerSchemalessGraph, '_create_or_verify_schema'):
+            graph_store = SpannerSchemalessGraph(
+                instance_id="test-instance", database_id="test-db", client=mock_client
+            )
+
+            source_doc = Document(page_content="This is the source.", metadata={"author": "Gemini"})
+            node1 = Node(id="N1", type="T1")
+            graph_doc = GraphDocument(source=source_doc, nodes=[node1], relationships=[])
+
+            mock_transaction = MagicMock()
+            graph_store._database.run_in_transaction = MagicMock(side_effect=lambda func: func(mock_transaction))
+
+            # Act
+            graph_store.add_graph_documents([graph_doc], include_source=True, baseEntityLabel=True)
+
+            # Assert
+            graph_store._database.run_in_transaction.assert_called_once()
+            
+            self.assertGreater(len(mock_transaction.insert_or_update.call_args_list), 0)
+            node_call = mock_transaction.insert_or_update.call_args_list[0]
+            self.assertEqual(node_call.kwargs['table'], 'GraphNode')
+            
+            values = list(node_call.kwargs['values'])
+            self.assertEqual(len(values), 1)
+            
+            node_properties = values[0][2]
+            self.assertIsInstance(node_properties, JsonObject)
+
+            # Check for baseEntityLabel
+            self.assertIn("baseEntityLabel", node_properties)
+            self.assertEqual(node_properties["baseEntityLabel"], True)
+
+            # Check for source information
+            self.assertIn("source", node_properties)
+            source_info = node_properties["source"]
+            self.assertEqual(source_info["page_content"], "This is the source.")
+            self.assertEqual(source_info["metadata"]["author"], "Gemini")
 
 if __name__ == "__main__":
     unittest.main()
