@@ -4,7 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 import hashlib
 
-from google.cloud.spanner_v1 import Client, param_types
+from google.cloud.spanner_v1 import Client, JsonObject
 from google.cloud.spanner_v1.database import Database
 from google.cloud.spanner_v1.pool import AbstractSessionPool
 from google.cloud.spanner_v1.transaction import Transaction
@@ -119,7 +119,7 @@ class SpannerSchemalessGraph:
                 for node in doc.nodes:
                     node_id = self._get_int64_hash(f"{node.type}-{node.id}")
                     properties = node.properties or {}
-                    node_mutations.append((node_id, node.type, json.dumps(properties)))
+                    node_mutations.append((node_id, node.type, JsonObject(properties)))
 
                 for rel in doc.relationships:
                     source_hash_id = self._get_int64_hash(f"{rel.source.type}-{rel.source.id}")
@@ -127,7 +127,7 @@ class SpannerSchemalessGraph:
                     edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{rel.type}-{target_hash_id}")
                     
                     properties = rel.properties or {}
-                    edge_mutations.append((source_hash_id, target_hash_id, edge_hash_id, rel.type, json.dumps(properties)))
+                    edge_mutations.append((source_hash_id, target_hash_id, edge_hash_id, rel.type, JsonObject(properties)))
 
             if node_mutations:
                 transaction.insert_or_update(
@@ -161,21 +161,14 @@ class SpannerSchemalessGraph:
 
     def cleanup(self) -> None:
         """Deletes the graph, node, and edge tables safely."""
+        ddl_statements = [
+            f"DROP PROPERTY GRAPH IF EXISTS {self.graph_name}",
+            f"DROP TABLE IF EXISTS {self.edge_table}",
+            f"DROP TABLE IF EXISTS {self.node_table}",
+        ]
         try:
-            op_graph = self._database.update_ddl(ddl_statements=[
-                f"DROP PROPERTY GRAPH IF EXISTS {self.graph_name}"
-            ])
-            op_graph.result(timeout=200)
-
-            op_edges = self._database.update_ddl(ddl_statements=[
-                f"DROP TABLE IF EXISTS {self.edge_table}"
-            ])
-            op_edges.result(timeout=200)
-
-            op_nodes = self._database.update_ddl(ddl_statements=[
-                f"DROP TABLE IF EXISTS {self.node_table}"
-            ])
-            op_nodes.result(timeout=200)
-            
+            op = self._database.update_ddl(ddl_statements=ddl_statements)
+            op.result(timeout=200)
         except Exception as e:
-            print(f"Cleanup failed (resources might not exist or other error): {e}")
+            # This is expected if the resources don't exist, so we don't log it.
+            pass
