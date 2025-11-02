@@ -67,8 +67,12 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             graph_store.add_graph_documents([graph_doc])
 
             # Assert
-            graph_store._database.run_in_transaction.assert_called_once()
+            # We expect two transactions: one for nodes, one for edges
+            self.assertEqual(graph_store._database.run_in_transaction.call_count, 2)
             
+            # Check that insert_or_update was called twice (once per transaction)
+            self.assertEqual(mock_transaction.insert_or_update.call_count, 2)
+
             # Check node mutations
             node_call = mock_transaction.insert_or_update.call_args_list[0]
             self.assertEqual(node_call.kwargs['table'], 'GraphNode')

@@ -107,66 +107,72 @@ class SpannerSchemalessGraph:
         graph_documents: List[GraphDocument],
         include_source: bool = False,
         baseEntityLabel: bool = False,
+        batch_size: int = 1000,
     ) -> None:
-        """Adds graph documents to the Spanner database."""
+        """Adds graph documents to the Spanner database in batches to avoid mutation limits."""
         self._create_or_verify_schema()
 
-        def insert_data(transaction: Transaction) -> None:
-            node_columns = ["id", "label", "properties"]
-            edge_columns = ["id", "dest_id", "edge_id", "label", "properties"]
+        node_mutations = []
+        edge_mutations = []
 
-            node_mutations = []
-            edge_mutations = []
+        # First, gather all mutations from all documents
+        for doc in graph_documents:
+            for node in doc.nodes:
+                node_id = self._get_int64_hash(f"{node.type}-{node.id}")
+                properties = node.properties or {}
+                if baseEntityLabel:
+                    properties["baseEntityLabel"] = True
+                if include_source:
+                    properties["source"] = {
+                        "page_content": doc.source.page_content,
+                        "metadata": doc.source.metadata,
+                    }
+                node_mutations.append((node_id, node.type, JsonObject(properties)))
 
-            for doc in graph_documents:
-                for node in doc.nodes:
-                    node_id = self._get_int64_hash(f"{node.type}-{node.id}")
-                    properties = node.properties or {}
-                    if baseEntityLabel:
-                        properties["baseEntityLabel"] = True
-                    if include_source:
-                        properties["source"] = {
-                            "page_content": doc.source.page_content,
-                            "metadata": doc.source.metadata,
-                        }
-                    node_mutations.append((node_id, node.type, JsonObject(properties)))
+            for rel in doc.relationships:
+                source_hash_id = self._get_int64_hash(f"{rel.source.type}-{rel.source.id}")
+                target_hash_id = self._get_int64_hash(f"{rel.target.type}-{rel.target.id}")
+                edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{rel.type}-{target_hash_id}")
 
-                for rel in doc.relationships:
-                    source_hash_id = self._get_int64_hash(
-                        f"{rel.source.type}-{rel.source.id}"
+                properties = rel.properties or {}
+                edge_mutations.append(
+                    (
+                        source_hash_id,
+                        target_hash_id,
+                        edge_hash_id,
+                        rel.type,
+                        JsonObject(properties),
                     )
-                    target_hash_id = self._get_int64_hash(
-                        f"{rel.target.type}-{rel.target.id}"
-                    )
-                    edge_hash_id = self._get_int64_hash(
-                        f"{source_hash_id}-{rel.type}-{target_hash_id}"
-                    )
+                )
 
-                    properties = rel.properties or {}
-                    edge_mutations.append(
-                        (
-                            source_hash_id,
-                            target_hash_id,
-                            edge_hash_id,
-                            rel.type,
-                            JsonObject(properties),
-                        )
-                    )
+        node_columns = ["id", "label", "properties"]
+        edge_columns = ["id", "dest_id", "edge_id", "label", "properties"]
 
-            if node_mutations:
+        # Batch insert nodes
+        for i in range(0, len(node_mutations), batch_size):
+            node_batch = node_mutations[i : i + batch_size]
+            
+            def insert_node_batch(transaction: Transaction) -> None:
                 transaction.insert_or_update(
                     table=self.node_table,
                     columns=node_columns,
-                    values=node_mutations,
+                    values=node_batch,
                 )
-            if edge_mutations:
+            
+            self._database.run_in_transaction(insert_node_batch)
+
+        # Batch insert edges
+        for i in range(0, len(edge_mutations), batch_size):
+            edge_batch = edge_mutations[i : i + batch_size]
+
+            def insert_edge_batch(transaction: Transaction) -> None:
                 transaction.insert_or_update(
                     table=self.edge_table,
                     columns=edge_columns,
-                    values=edge_mutations,
+                    values=edge_batch,
                 )
 
-        self._database.run_in_transaction(insert_data)
+            self._database.run_in_transaction(insert_edge_batch)
 
     def query(self, query: str) -> List[Dict[str, Any]]:
         """Executes a GoogleSQL query against the database."""
