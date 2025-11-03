@@ -60,8 +60,9 @@ class SpannerSchemalessGraph:
             if self.node_table not in existing_tables:
                 table_ddls.append(f"""CREATE TABLE {self.node_table} (
                       id INT64 NOT NULL,
-                      label STRING(MAX),
-                      properties JSON,
+                                  label STRING(MAX),
+                                  properties JSON,
+                                  embedding ARRAY<FLOAT64>,
                     ) PRIMARY KEY (id)""")
 
             if self.edge_table not in existing_tables:
@@ -131,6 +132,7 @@ class SpannerSchemalessGraph:
                 node_id = self._get_int64_hash(f"{node_label}-{node_id_str}")
                 
                 properties = self._lowercase_keys(node.properties or {})
+                embedding_data = properties.pop("embedding", None) # 提取 embedding
 
                 if baseEntityLabel:
                     properties["baseentitylabel"] = True
@@ -139,7 +141,7 @@ class SpannerSchemalessGraph:
                         "page_content": doc.source.page_content,
                         "metadata": self._lowercase_keys(doc.source.metadata),
                     }
-                node_mutations.append((node_id, node_label, JsonObject(properties)))
+                node_mutations.append((node_id, node_label, JsonObject(properties), embedding_data))
 
             for rel in doc.relationships:
                 source_label = rel.source.type.lower()
@@ -163,7 +165,7 @@ class SpannerSchemalessGraph:
                     )
                 )
 
-        node_columns = ["id", "label", "properties"]
+        node_columns = ["id", "label", "properties", "embedding"]
         edge_columns = ["id", "dest_id", "edge_id", "label", "properties"]
 
         # Batch insert nodes

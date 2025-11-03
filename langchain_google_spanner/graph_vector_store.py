@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import uuid
 import math
-import math
 from typing import Any, Iterable, List, Optional, Type
 
 from google.cloud import spanner
@@ -27,13 +26,28 @@ class SpannerGraphVectorStore(VectorStore):
         embedding: Embeddings,
         node_label: str,
         text_properties: List[str],
-        embedding_property: str = "embedding",
+        embedding_property: str = "embedding", # This now refers to the dedicated column
     ):
         self._graph = graph
         self._embedding = embedding
         self.node_label = node_label
         self.text_properties = text_properties
+        # The embedding_property name is kept for consistency, but it maps to a dedicated column
         self.embedding_property = embedding_property
+
+    @staticmethod
+    def _get_value_by_path(data: dict, path: str) -> Any:
+        """Retrieves a value from a nested dictionary using a dot-separated path."""
+        keys = path.split('.')
+        value = data
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+            if value is None:
+                return None
+        return value
 
     @property
     def embeddings(self) -> Embeddings:
@@ -47,6 +61,7 @@ class SpannerGraphVectorStore(VectorStore):
     ) -> List[str]:
         """
         Adds texts as nodes to the graph and embeds them.
+        The embedding is stored in the dedicated 'embedding' column.
         """
         texts = list(texts)
         if not texts:
@@ -61,9 +76,11 @@ class SpannerGraphVectorStore(VectorStore):
         for i, text in enumerate(texts):
             node_id = str(uuid.uuid4())
             ids.append(node_id)
-            metadata = metadatas[i]
+            
+            # Embeddings are now a top-level property of the Node
+            # to be handled by our modified SpannerSchemalessGraph
             properties = {
-                **metadata,
+                **metadatas[i],
                 self.text_properties[0]: text,
                 self.embedding_property: embeddings[i],
             }
@@ -85,13 +102,15 @@ class SpannerGraphVectorStore(VectorStore):
     def similarity_search_by_vector(
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
-        """Perform a similarity search by vector using Spanner's native vector functions."""
-
+        """
+        Perform a similarity search by vector using Spanner's native vector functions
+        on the dedicated `embedding` column.
+        """
         query = f"""
-        SELECT properties
+        SELECT properties, {self.embedding_property}
         FROM {self._graph.node_table}
-        WHERE label = @node_label
-        ORDER BY COSINE_DISTANCE(FLOAT64_ARRAY(JSON_QUERY(properties, '$.{self.embedding_property}')), @query_embedding)
+        WHERE label = @node_label AND {self.embedding_property} IS NOT NULL
+        ORDER BY COSINE_DISTANCE({self.embedding_property}, @query_embedding)
         LIMIT @limit
         """
 
@@ -116,19 +135,20 @@ class SpannerGraphVectorStore(VectorStore):
                 return []
 
             for row in rows:
-                props = row[0]
+                props, emb = row
                 if isinstance(props, str):
                     try:
                         props = json.loads(props)
                     except json.JSONDecodeError:
                         continue
-
+                
                 text = " ".join(
-                    str(props.get(key, "")) for key in self.text_properties
+                    str(SpannerGraphVectorStore._get_value_by_path(props, key) or "") for key in self.text_properties
                 ).strip()
-                metadata = {
-                    k: v for k, v in props.items() if k != self.embedding_property
-                }
+                
+                # Metadata no longer needs to filter the embedding property,
+                # as it's in a separate column.
+                metadata = props
                 docs.append(Document(page_content=text, metadata=metadata))
 
         return docs
@@ -171,7 +191,7 @@ class SpannerGraphVectorStore(VectorStore):
     ) -> SpannerGraphVectorStore:
         """
         Create a SpannerGraphVectorStore from an existing Spanner graph,
-        populating embeddings for nodes that are missing them.
+        populating the dedicated `embedding` column for nodes that are missing it.
         """
         print(f"Starting to populate embeddings for nodes with label '{node_label}'...")
 
@@ -179,8 +199,7 @@ class SpannerGraphVectorStore(VectorStore):
             query = f"""
             SELECT id, properties
             FROM {graph.node_table}
-            WHERE label = @node_label
-            AND JSON_VALUE(properties, '$.{embedding_property}') IS NULL
+            WHERE label = @node_label AND {embedding_property} IS NULL
             """
             params = {"node_label": node_label}
             param_types = {"node_label": spanner.param_types.STRING}
@@ -199,7 +218,6 @@ class SpannerGraphVectorStore(VectorStore):
                         properties = {}
                 else:
                     properties = dict(properties)
-
                 nodes_to_process.append({"node_id": node_id, "properties": properties})
 
             if not nodes_to_process:
@@ -210,7 +228,7 @@ class SpannerGraphVectorStore(VectorStore):
 
             texts_to_embed = [
                 " ".join(
-                    str(node["properties"].get(p, "")) for p in text_properties
+                    str(SpannerGraphVectorStore._get_value_by_path(node["properties"], p) or "") for p in text_properties
                 ).strip()
                 for node in nodes_to_process
             ]
@@ -218,16 +236,13 @@ class SpannerGraphVectorStore(VectorStore):
 
             nodes_to_update = []
             for i, node in enumerate(nodes_to_process):
-                props = node.get("properties", {})
-                props[embedding_property] = [float(x) for x in embeddings[i]]
-                nodes_to_update.append((node["node_id"], node_label, props))
-
-            print(nodes_to_update)
+                sanitized_embedding = [x if math.isfinite(x) else 0.0 for x in embeddings[i]]
+                nodes_to_update.append((node["node_id"], sanitized_embedding))
 
             transaction.update(
                 table=graph.node_table,
-                columns=("id", "label", "properties"),
-                values=[(n[0], n[1], JsonObject(n[2])) for n in nodes_to_update],
+                columns=("id", embedding_property),
+                values=nodes_to_update,
             )
             return len(nodes_to_update)
 

@@ -12,6 +12,23 @@ from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGra
 
 
 class TestSpannerGraphVectorStore(unittest.TestCase):
+    def test_get_value_by_path(self):
+        """Tests the _get_value_by_path static method."""
+        data = {
+            "top_level": "value1",
+            "nested": {
+                "level2": "value2",
+                "another": {
+                    "level3": "value3"
+                }
+            }
+        }
+        self.assertEqual(SpannerGraphVectorStore._get_value_by_path(data, "top_level"), "value1")
+        self.assertEqual(SpannerGraphVectorStore._get_value_by_path(data, "nested.level2"), "value2")
+        self.assertEqual(SpannerGraphVectorStore._get_value_by_path(data, "nested.another.level3"), "value3")
+        self.assertIsNone(SpannerGraphVectorStore._get_value_by_path(data, "non.existent.path"))
+        self.assertIsNone(SpannerGraphVectorStore._get_value_by_path(data, "top_level.non_existent"))
+
     def test_similarity_search_by_vector_sql_generation(self):
         """
         Tests if similarity_search_by_vector generates the correct SQL query and parameters.
@@ -53,10 +70,10 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
 
         # Define the expected query string
         expected_query = """
-        SELECT properties
+        SELECT properties, embedding
         FROM MockNodes
-        WHERE label = @node_label
-        ORDER BY COSINE_DISTANCE(FLOAT64_ARRAY(JSON_QUERY(properties, '$.embedding')), @query_embedding)
+        WHERE label = @node_label AND embedding IS NOT NULL
+        ORDER BY COSINE_DISTANCE(embedding, @query_embedding)
         LIMIT @limit
         """
         

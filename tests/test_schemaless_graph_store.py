@@ -74,7 +74,7 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             # Check node mutations
             node_call = mock_transaction.insert_or_update.call_args_list[0]
             self.assertEqual(node_call.kwargs['table'], 'GraphNode')
-            self.assertEqual(node_call.kwargs['columns'], ['id', 'label', 'properties'])
+            self.assertEqual(node_call.kwargs['columns'], ['id', 'label', 'properties', 'embedding'])
             
             values = list(node_call.kwargs['values'])
             self.assertEqual(len(values), 2)
@@ -83,6 +83,8 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             sundar_node_val = next(v for v in values if v[1] == "person")
 
             self.assertEqual(google_node_val[2]['country'], 'USA')
+            self.assertIsNone(google_node_val[3]) # embedding should be None initially
+            self.assertIsNone(sundar_node_val[3]) # embedding should be None initially
 
             # Check edge mutations
             edge_call = mock_transaction.insert_or_update.call_args_list[1]

@@ -76,7 +76,7 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
             graph=self.graph,
             embedding=embedding_service,
             node_label="document",
-            text_properties=["text"],
+            text_properties=['text'],
             embedding_property="embedding"
         )
 
@@ -84,14 +84,14 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
 
         # 3. Verify embeddings were populated
         
-        populated_nodes_query = f"SELECT properties FROM {self.node_table}"
+        populated_nodes_query = f"SELECT properties, embedding FROM {self.node_table}"
         populated_nodes = self.graph.query(populated_nodes_query)
         
         self.assertEqual(len(populated_nodes), 3)
         for node in populated_nodes:
-            props = node['properties']
-            self.assertIn("embedding", props)
-            self.assertEqual(len(props['embedding']), 768)
+            self.assertIn("embedding", node)
+            self.assertIsNotNone(node["embedding"])
+            self.assertEqual(len(node["embedding"]), 768)
 
         # 4. Perform a similarity search
         query_text = "A feline was resting."
