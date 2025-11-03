@@ -64,15 +64,15 @@ class TestFullPipelineIntegration(unittest.TestCase):
 
         self.graph_store.add_graph_documents(graph_documents)
 
-        microsoft_id = self._get_int64_hash("Company-Microsoft")
-        github_id = self._get_int64_hash("Product-GitHub")
+        microsoft_id = self._get_int64_hash("company-microsoft")
+        github_id = self._get_int64_hash("company-github")
 
         node_query = f"SELECT label, properties FROM {self.node_table} WHERE id = {microsoft_id}"
         node_result = self.graph_store.query(node_query)
         
         self.assertEqual(len(node_result), 1)
         retrieved_node = node_result[0]
-        self.assertEqual(retrieved_node['label'], 'Company')
+        self.assertEqual(retrieved_node['label'], 'company')
         retrieved_props = retrieved_node['properties']
         self.assertIn('location', retrieved_props)
         self.assertEqual(retrieved_props['location'], 'Redmond')
@@ -83,7 +83,7 @@ class TestFullPipelineIntegration(unittest.TestCase):
 
         self.assertEqual(len(edge_result), 1)
         retrieved_edge = edge_result[0]
-        self.assertEqual(retrieved_edge['label'], 'ACQUIRED')
+        self.assertEqual(retrieved_edge['label'], 'acquired')
         retrieved_edge_props = retrieved_edge['properties']
         self.assertIn('date', retrieved_edge_props)
         self.assertEqual(retrieved_edge_props['date'], 'October 26, 2018')
@@ -96,6 +96,10 @@ class TestFullPipelineIntegration(unittest.TestCase):
 
         self.graph_store.cleanup()
 
+        # Add a delay to allow DDL operations to complete
+        import time
+        time.sleep(15)
+
         doc2 = Document(page_content="Second document.")
         graph_doc2 = GraphDocument(nodes=[Node(id="B", type="Thing")], relationships=[], source=doc2)
         
@@ -104,11 +108,11 @@ class TestFullPipelineIntegration(unittest.TestCase):
         except Exception as e:
             self.fail(f"add_graph_documents failed unexpectedly after cleanup with error: {e}")
 
-        node_b_id = self._get_int64_hash("Thing-B")
+        node_b_id = self._get_int64_hash("thing-b")
         node_query = f"SELECT label FROM {self.node_table} WHERE id = {node_b_id}"
         node_result = self.graph_store.query(node_query)
         self.assertEqual(len(node_result), 1)
-        self.assertEqual(node_result[0]['label'], 'Thing')
+        self.assertEqual(node_result[0]['label'], 'thing')
 
 if __name__ == "__main__":
     unittest.main()

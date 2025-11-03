@@ -102,6 +102,14 @@ class SpannerSchemalessGraph:
         except Exception as e:
             print(f"An error occurred during schema verification/creation: {e}")
 
+    def _lowercase_keys(self, obj: Any) -> Any:
+        """Recursively converts all keys in a dictionary to lowercase."""
+        if isinstance(obj, dict):
+            return {str(k).lower(): self._lowercase_keys(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._lowercase_keys(elem) for elem in obj]
+        return obj
+
     def add_graph_documents(
         self,
         graph_documents: List[GraphDocument],
@@ -118,29 +126,39 @@ class SpannerSchemalessGraph:
         # First, gather all mutations from all documents
         for doc in graph_documents:
             for node in doc.nodes:
-                node_id = self._get_int64_hash(f"{node.type}-{node.id}")
-                properties = node.properties or {}
+                node_label = node.type.lower()
+                node_id_str = node.id.lower()
+                node_id = self._get_int64_hash(f"{node_label}-{node_id_str}")
+                
+                properties = self._lowercase_keys(node.properties or {})
+
                 if baseEntityLabel:
-                    properties["baseEntityLabel"] = True
+                    properties["baseentitylabel"] = True
                 if include_source:
                     properties["source"] = {
                         "page_content": doc.source.page_content,
-                        "metadata": doc.source.metadata,
+                        "metadata": self._lowercase_keys(doc.source.metadata),
                     }
-                node_mutations.append((node_id, node.type, JsonObject(properties)))
+                node_mutations.append((node_id, node_label, JsonObject(properties)))
 
             for rel in doc.relationships:
-                source_hash_id = self._get_int64_hash(f"{rel.source.type}-{rel.source.id}")
-                target_hash_id = self._get_int64_hash(f"{rel.target.type}-{rel.target.id}")
-                edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{rel.type}-{target_hash_id}")
+                source_label = rel.source.type.lower()
+                source_id_str = rel.source.id.lower()
+                target_label = rel.target.type.lower()
+                target_id_str = rel.target.id.lower()
+                edge_label = rel.type.lower()
 
-                properties = rel.properties or {}
+                source_hash_id = self._get_int64_hash(f"{source_label}-{source_id_str}")
+                target_hash_id = self._get_int64_hash(f"{target_label}-{target_id_str}")
+                edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{edge_label}-{target_hash_id}")
+
+                properties = self._lowercase_keys(rel.properties or {})
                 edge_mutations.append(
                     (
                         source_hash_id,
                         target_hash_id,
                         edge_hash_id,
-                        rel.type,
+                        edge_label,
                         JsonObject(properties),
                     )
                 )

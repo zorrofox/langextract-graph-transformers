@@ -1,5 +1,3 @@
-
-
 import unittest
 from unittest.mock import patch, MagicMock, ANY, call
 import json
@@ -81,8 +79,8 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             values = list(node_call.kwargs['values'])
             self.assertEqual(len(values), 2)
             
-            google_node_val = next(v for v in values if v[1] == "Company")
-            sundar_node_val = next(v for v in values if v[1] == "Person")
+            google_node_val = next(v for v in values if v[1] == "company")
+            sundar_node_val = next(v for v in values if v[1] == "person")
 
             self.assertEqual(google_node_val[2]['country'], 'USA')
 
@@ -92,9 +90,9 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             self.assertEqual(edge_call.kwargs['columns'], ['id', 'dest_id', 'edge_id', 'label', 'properties'])
             
             edge_values = edge_call.kwargs['values'][0]
-            self.assertEqual(edge_values[0], graph_store._get_int64_hash("Company-Google"))
-            self.assertEqual(edge_values[1], graph_store._get_int64_hash("Person-Sundar Pichai"))
-            self.assertEqual(edge_values[3], 'IS_CEO_OF')
+            self.assertEqual(edge_values[0], graph_store._get_int64_hash("company-google"))
+            self.assertEqual(edge_values[1], graph_store._get_int64_hash("person-sundar pichai"))
+            self.assertEqual(edge_values[3], 'is_ceo_of')
             self.assertEqual(edge_values[4]['start_year'], 2015)
 
     @patch("google.cloud.spanner_v1.Client")
@@ -158,8 +156,8 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             self.assertIsInstance(node_properties, JsonObject)
 
             # Check for baseEntityLabel
-            self.assertIn("baseEntityLabel", node_properties)
-            self.assertEqual(node_properties["baseEntityLabel"], True)
+            self.assertIn("baseentitylabel", node_properties)
+            self.assertEqual(node_properties["baseentitylabel"], True)
 
             # Check for source information
             self.assertIn("source", node_properties)

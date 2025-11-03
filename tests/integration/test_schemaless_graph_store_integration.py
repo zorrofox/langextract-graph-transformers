@@ -9,7 +9,7 @@ from langchain_core.documents import Document
 from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
 
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..\..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
 
 load_dotenv()
@@ -60,28 +60,26 @@ class TestSchemalessGraphStoreIntegration(unittest.TestCase):
         self.graph.add_graph_documents([graph_doc])
 
         # 3. Query the data back and verify
-        import time
-        time.sleep(5) 
 
         # Query for the node
-        node_id = self._get_int64_hash("Company-TestCorp")
+        node_id = self._get_int64_hash(f"{node1.type.lower()}-{node1.id}")
         node_query = f"SELECT label, properties FROM {self.node_table} WHERE id = {node_id}"
         node_result = self.graph.query(node_query)
         
         self.assertEqual(len(node_result), 1)
         retrieved_node = node_result[0]
-        self.assertEqual(retrieved_node['label'], 'Company')
+        self.assertEqual(retrieved_node['label'], 'company')
         retrieved_node_props = retrieved_node['properties']
         self.assertEqual(retrieved_node_props['employees'], 1000)
 
         # Query for the edge
-        source_hash_id = self._get_int64_hash("Company-TestCorp")
+        source_hash_id = self._get_int64_hash(f"{node1.type.lower()}-{node1.id}")
         edge_query = f"SELECT label, properties FROM {self.edge_table} WHERE id = {source_hash_id}"
         edge_result = self.graph.query(edge_query)
 
         self.assertEqual(len(edge_result), 1)
         retrieved_edge = edge_result[0]
-        self.assertEqual(retrieved_edge['label'], 'EMPLOYS')
+        self.assertEqual(retrieved_edge['label'], 'employs')
         retrieved_edge_props = retrieved_edge['properties']
         self.assertEqual(retrieved_edge_props['duration_years'], 5)
 
@@ -97,12 +95,8 @@ class TestSchemalessGraphStoreIntegration(unittest.TestCase):
         # Act
         self.graph.add_graph_documents([graph_doc], include_source=True, baseEntityLabel=True)
 
-        # Allow time for data to be written
-        import time
-        time.sleep(5)
-
         # Assert
-        node_id = self._get_int64_hash("TestNode-NodeWithOptions")
+        node_id = self._get_int64_hash(f"{node.type.lower()}-{node.id}")
         node_query = f"SELECT properties FROM {self.node_table} WHERE id = {node_id}"
         node_result = self.graph.query(node_query)
 
@@ -110,7 +104,7 @@ class TestSchemalessGraphStoreIntegration(unittest.TestCase):
         retrieved_props = node_result[0]['properties']
 
         # Verify baseEntityLabel
-        self.assertTrue(retrieved_props.get('baseEntityLabel'))
+        self.assertTrue(retrieved_props.get('baseentitylabel'))
 
         # Verify source information
         self.assertIn('source', retrieved_props)
