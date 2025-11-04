@@ -1,5 +1,6 @@
 
 import unittest
+from unittest.mock import patch
 import os
 import uuid
 from dotenv import load_dotenv
@@ -44,14 +45,17 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
     def tearDown(self):
         self.graph.cleanup()
 
-    def test_e2e_vector_store_lifecycle(self):
+    @patch("langchain_community.embeddings.FakeEmbeddings.embed_documents")
+    def test_e2e_vector_store_lifecycle(self, mock_embed_documents):
         """
-        Tests the full lifecycle: 
-        1. Add nodes without embeddings.
-        2. Use from_existing_graph to populate embeddings.
-        3. Perform a similarity search.
+        Tests the full lifecycle, including the include_label_in_embedding feature.
         """
-        # 1. Add nodes without embeddings
+        # 1. Setup mock for embedding
+        embedding_service = FakeEmbeddings(size=768)
+        # Since the content is now dynamic, we just mock the return value
+        mock_embed_documents.return_value = [embedding_service.embed_query("foo")] * 3
+
+        # 2. Add nodes without embeddings
         docs_to_add = [
             "The cat sat on the mat.",
             "The dog chased the ball.",
@@ -62,45 +66,39 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
         graph_doc = GraphDocument(nodes=nodes, relationships=[], source=source_doc)
         self.graph.add_graph_documents([graph_doc])
 
-
-
-        # Per user instruction, removed polling logic.
-        # The test now assumes immediate data visibility.
         count_query = f"SELECT COUNT(*) as count FROM {self.node_table} WHERE label = 'document'"
         result = self.graph.query(count_query)
         self.assertEqual(result[0]['count'], 3, "Initial graph data not visible.")
-        # 2. Use from_existing_graph to populate embeddings
-        embedding_service = FakeEmbeddings(size=768)
-        
+
+        # 3. Use from_existing_graph to populate embeddings, including the label
         vector_store = SpannerGraphVectorStore.from_existing_graph(
             graph=self.graph,
             embedding=embedding_service,
-            node_label="document",
             text_properties=['text'],
-            embedding_property="embedding"
+            include_label_in_embedding=True,
         )
 
-        self.assertIsInstance(vector_store, SpannerGraphVectorStore)
+        # 4. Assert embed_documents was called correctly
+        mock_embed_documents.assert_called_once()
+        call_args, _ = mock_embed_documents.call_args
+        self.assertIn("document The cat sat on the mat.", call_args[0])
+        self.assertIn("document The dog chased the ball.", call_args[0])
+        self.assertIn("document It was a sunny day.", call_args[0])
 
-        # 3. Verify embeddings were populated
-        
-        populated_nodes_query = f"SELECT properties, embedding FROM {self.node_table}"
+        # 5. Verify embeddings were populated in the database
+        populated_nodes_query = f"SELECT embedding FROM {self.node_table}"
         populated_nodes = self.graph.query(populated_nodes_query)
-        
         self.assertEqual(len(populated_nodes), 3)
         for node in populated_nodes:
-            self.assertIn("embedding", node)
             self.assertIsNotNone(node["embedding"])
             self.assertEqual(len(node["embedding"]), 768)
 
-        # 4. Perform a similarity search
+        # 6. Perform a similarity search
+        vector_store.node_label = "document"
         query_text = "A feline was resting."
         results = vector_store.similarity_search(query=query_text, k=1)
 
         self.assertEqual(len(results), 1)
-        # FakeEmbeddings creates embeddings from a hash of the text, so similar
-        # texts won't necessarily have similar vectors. This test mainly ensures
-        # the search runs without error and returns the correct number of documents.
         self.assertIn(results[0].page_content, docs_to_add)
 
 

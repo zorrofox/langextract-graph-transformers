@@ -49,7 +49,6 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
             embedding=embedding_service,
             node_label="document",
             text_properties=['text'],
-            embedding_property="embedding"
         )
 
         # 3. Call the method to be tested
@@ -100,6 +99,53 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         # Assert parameters and their types are correct
         self.assertDictEqual(expected_params, actual_params)
         self.assertDictEqual(expected_param_types, actual_param_types)
+
+
+    @patch("langchain_core.embeddings.FakeEmbeddings.embed_documents")
+    def test_from_existing_graph_batching(self, mock_embed_documents):
+        """Tests the batching and pagination logic in from_existing_graph."""
+        # 1. Setup Mocks
+        mock_graph = MagicMock()
+        mock_graph.node_table = "MockNodes"
+        mock_snapshot = MagicMock()
+        mock_graph._database.snapshot.return_value.__enter__.return_value = mock_snapshot
+
+        # Mock the result stream to simulate fetching data in multiple batches
+        mock_snapshot.execute_sql.side_effect = [
+            [
+                (1, "doc", {"text": "Content 1"}),
+                (2, "doc", {"text": "Content 2"}),
+            ],
+            [
+                (3, "person", {"name": "John Doe"}),
+            ],
+            [] # Terminate the loop
+        ]
+
+        embedding_service = FakeEmbeddings(size=8)
+        mock_embed_documents.side_effect = [[[0.1]*8, [0.2]*8], [[0.3]*8]]
+
+        # 2. Call the method with empty text_properties to test label-only embedding
+        SpannerGraphVectorStore.from_existing_graph(
+            graph=mock_graph,
+            embedding=embedding_service,
+            text_properties=[], # Test label-only embedding
+            include_label_in_embedding=True,
+            batch_size=2 # Set batch size to 2
+        )
+
+        # 3. Assertions
+        self.assertEqual(mock_snapshot.execute_sql.call_count, 3)
+        self.assertEqual(mock_embed_documents.call_count, 2)
+        self.assertEqual(mock_graph._database.run_in_transaction.call_count, 2)
+
+        # Assert content of the first embedding call (should be labels only)
+        first_call_args, _ = mock_embed_documents.call_args_list[0]
+        self.assertEqual(["doc", "doc"], first_call_args[0])
+
+        # Assert content of the second embedding call (should be labels only)
+        second_call_args, _ = mock_embed_documents.call_args_list[1]
+        self.assertEqual(["person"], second_call_args[0])
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,16 +24,14 @@ class SpannerGraphVectorStore(VectorStore):
         self,
         graph: SpannerSchemalessGraph,
         embedding: Embeddings,
-        node_label: str,
+        node_label: Optional[str], # Now optional
         text_properties: List[str],
-        embedding_property: str = "embedding", # This now refers to the dedicated column
     ):
         self._graph = graph
         self._embedding = embedding
         self.node_label = node_label
         self.text_properties = text_properties
-        # The embedding_property name is kept for consistency, but it maps to a dedicated column
-        self.embedding_property = embedding_property
+        self.embedding_property = "embedding" # Hardcoded to match schema
 
     @staticmethod
     def _get_value_by_path(data: dict, path: str) -> Any:
@@ -61,7 +59,6 @@ class SpannerGraphVectorStore(VectorStore):
     ) -> List[str]:
         """
         Adds texts as nodes to the graph and embeds them.
-        The embedding is stored in the dedicated 'embedding' column.
         """
         texts = list(texts)
         if not texts:
@@ -77,8 +74,6 @@ class SpannerGraphVectorStore(VectorStore):
             node_id = str(uuid.uuid4())
             ids.append(node_id)
             
-            # Embeddings are now a top-level property of the Node
-            # to be handled by our modified SpannerSchemalessGraph
             properties = {
                 **metadatas[i],
                 self.text_properties[0]: text,
@@ -103,9 +98,11 @@ class SpannerGraphVectorStore(VectorStore):
         self, embedding: List[float], k: int = 4, **kwargs: Any
     ) -> List[Document]:
         """
-        Perform a similarity search by vector using Spanner's native vector functions
-        on the dedicated `embedding` column.
+        Perform a similarity search by vector using Spanner's native vector functions.
         """
+        if not self.node_label:
+            raise ValueError("node_label must be set on the VectorStore for similarity search.")
+
         query = f"""
         SELECT properties, {self.embedding_property}
         FROM {self._graph.node_table}
@@ -143,11 +140,9 @@ class SpannerGraphVectorStore(VectorStore):
                         continue
                 
                 text = " ".join(
-                    str(SpannerGraphVectorStore._get_value_by_path(props, key) or "") for key in self.text_properties
+                    str(self._get_value_by_path(props, key) or "") for key in self.text_properties
                 ).strip()
                 
-                # Metadata no longer needs to filter the embedding property,
-                # as it's in a separate column.
                 metadata = props
                 docs.append(Document(page_content=text, metadata=metadata))
 
@@ -163,7 +158,6 @@ class SpannerGraphVectorStore(VectorStore):
         graph: SpannerSchemalessGraph,
         node_label: str,
         text_properties: List[str],
-        embedding_property: str = "embedding",
         **kwargs: Any,
     ) -> SpannerGraphVectorStore:
         """
@@ -174,7 +168,6 @@ class SpannerGraphVectorStore(VectorStore):
             embedding=embedding,
             node_label=node_label,
             text_properties=text_properties,
-            embedding_property=embedding_property,
         )
         store.add_texts(texts, metadatas, **kwargs)
         return store
@@ -184,33 +177,60 @@ class SpannerGraphVectorStore(VectorStore):
         cls: Type[SpannerGraphVectorStore],
         graph: SpannerSchemalessGraph,
         embedding: Embeddings,
-        node_label: str,
         text_properties: List[str],
-        embedding_property: str = "embedding",
-        batch_size: int = 100,
+        node_label: Optional[str] = None,
+        include_label_in_embedding: bool = False,
+        batch_size: int = 1000,
     ) -> SpannerGraphVectorStore:
         """
         Create a SpannerGraphVectorStore from an existing Spanner graph,
-        populating the dedicated `embedding` column for nodes that are missing it.
+        populating the dedicated embedding column for nodes that are missing it.
         """
-        print(f"Starting to populate embeddings for nodes with label '{node_label}'...")
+        embedding_property = "embedding" # Hardcoded to match schema
+        print(f"Starting to populate '{embedding_property}' column for nodes...")
+        if node_label:
+            print(f"Filtering for node_label: '{node_label}'")
+        if include_label_in_embedding:
+            print("Including node label in content for embedding.")
 
-        def _fetch_and_update_in_batches(transaction) -> int:
-            query = f"""
-            SELECT id, properties
-            FROM {graph.node_table}
-            WHERE label = @node_label AND {embedding_property} IS NULL
-            """
-            params = {"node_label": node_label}
-            param_types = {"node_label": spanner.param_types.STRING}
+        total_updated_count = 0
+        last_processed_id = None
+        
+        while True:
+            # ... (query building logic remains the same) ...
+            base_query = f"SELECT id, label, properties FROM {graph.node_table}"
+            where_clauses = [f"{embedding_property} IS NULL"]
+            params = {}
+            param_types = {}
 
-            result_stream = transaction.execute_sql(
-                query, params=params, param_types=param_types
-            )
+            if node_label:
+                where_clauses.append("label = @node_label")
+                params["node_label"] = node_label
+                param_types["node_label"] = spanner.param_types.STRING
 
-            nodes_to_process = []
-            for row in result_stream:
-                node_id, properties = row
+            if last_processed_id:
+                where_clauses.append("id > @last_processed_id")
+                params["last_processed_id"] = last_processed_id
+                param_types["last_processed_id"] = spanner.param_types.INT64
+            
+            params["batch_size"] = batch_size
+            param_types["batch_size"] = spanner.param_types.INT64
+
+            query = f"{base_query} WHERE {' AND '.join(where_clauses)} ORDER BY id LIMIT @batch_size"
+
+            with graph._database.snapshot() as snapshot:
+                result_stream = snapshot.execute_sql(query, params=params, param_types=param_types)
+                nodes_to_process = list(result_stream)
+
+            num_found = len(nodes_to_process)
+            if num_found == 0:
+                print("No more nodes to update.")
+                break
+
+            print(f"Found {num_found} nodes to process in this batch...")
+
+            parsed_nodes = []
+            for node_id, label, properties in nodes_to_process:
                 if isinstance(properties, str):
                     try:
                         properties = json.loads(properties)
@@ -218,41 +238,51 @@ class SpannerGraphVectorStore(VectorStore):
                         properties = {}
                 else:
                     properties = dict(properties)
-                nodes_to_process.append({"node_id": node_id, "properties": properties})
+                parsed_nodes.append({"node_id": node_id, "label": label, "properties": properties})
 
-            if not nodes_to_process:
-                print("No nodes found to update.")
-                return 0
+            texts_to_embed = []
+            valid_nodes_for_embedding = []
+            for node in parsed_nodes:
+                text_parts = [str(cls._get_value_by_path(node["properties"], p) or "") for p in text_properties]
+                content = " ".join(text_parts).strip()
 
-            print(f"Found {len(nodes_to_process)} nodes to update.")
+                if include_label_in_embedding:
+                    content = f"{node['label']} {content}".strip()
+                
+                if content:
+                    texts_to_embed.append(content)
+                    valid_nodes_for_embedding.append(node)
 
-            texts_to_embed = [
-                " ".join(
-                    str(SpannerGraphVectorStore._get_value_by_path(node["properties"], p) or "") for p in text_properties
-                ).strip()
-                for node in nodes_to_process
-            ]
+            if not valid_nodes_for_embedding:
+                print("No nodes with valid text content in this batch. Skipping.")
+                last_processed_id = parsed_nodes[-1]["node_id"]
+                continue
+
             embeddings = embedding.embed_documents(texts_to_embed)
 
             nodes_to_update = []
-            for i, node in enumerate(nodes_to_process):
+            for i, node in enumerate(valid_nodes_for_embedding):
                 sanitized_embedding = [x if math.isfinite(x) else 0.0 for x in embeddings[i]]
                 nodes_to_update.append((node["node_id"], sanitized_embedding))
 
-            transaction.update(
-                table=graph.node_table,
-                columns=("id", embedding_property),
-                values=nodes_to_update,
-            )
-            return len(nodes_to_update)
+            def _update_batch(transaction):
+                transaction.update(
+                    table=graph.node_table,
+                    columns=("id", embedding_property),
+                    values=nodes_to_update,
+                )
+            
+            graph._database.run_in_transaction(_update_batch)
+            num_updated = len(nodes_to_update)
+            total_updated_count += num_updated
+            print(f"Successfully updated {num_updated} nodes. Total updated so far: {total_updated_count}")
 
-        graph._database.run_in_transaction(_fetch_and_update_in_batches)
+            last_processed_id = parsed_nodes[-1]["node_id"]
 
-        print("Initialization complete. Returning VectorStore instance.")
+        print(f"Initialization complete. Total nodes updated: {total_updated_count}")
         return cls(
             graph=graph,
             embedding=embedding,
             node_label=node_label,
             text_properties=text_properties,
-            embedding_property=embedding_property,
         )
