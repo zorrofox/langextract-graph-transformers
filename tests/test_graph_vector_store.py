@@ -12,6 +12,17 @@ from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGra
 
 
 class TestSpannerGraphVectorStore(unittest.TestCase):
+    def setUp(self):
+        """Set up the test environment."""
+        self.mock_snapshot = MagicMock()
+        self.mock_database = MagicMock()
+        self.mock_database.snapshot.return_value.__enter__.return_value = (
+            self.mock_snapshot
+        )
+        self.mock_graph = MagicMock(spec=SpannerSchemalessGraph)
+        self.mock_graph.node_table = "test_node_table"
+        self.mock_graph._database = self.mock_database
+
     def test_get_value_by_path(self):
         """Tests the _get_value_by_path static method."""
         data = {
@@ -34,18 +45,11 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         Tests if similarity_search_by_vector generates the correct SQL query and parameters.
         """
         # 1. Setup Mocks
-        mock_graph = MagicMock()
-        mock_graph.node_table = "MockNodes"
-        
-        # Mock the database snapshot and execute_sql call
-        mock_snapshot = MagicMock()
-        mock_graph._database.snapshot.return_value.__enter__.return_value = mock_snapshot
-        
         embedding_service = FakeEmbeddings(size=8)
 
         # 2. Instantiate the VectorStore
         vector_store = SpannerGraphVectorStore(
-            graph=mock_graph,
+            graph=self.mock_graph,
             embedding=embedding_service,
             node_label="document",
             text_properties=['text'],
@@ -57,10 +61,10 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
 
         # 4. Assertions
         # Check if execute_sql was called
-        mock_snapshot.execute_sql.assert_called_once()
+        self.mock_snapshot.execute_sql.assert_called_once()
 
         # Get the actual arguments passed to execute_sql
-        args, kwargs = mock_snapshot.execute_sql.call_args
+        args, kwargs = self.mock_snapshot.execute_sql.call_args
         
         # Extract query, params, and param_types from the call
         actual_query = args[0]
@@ -68,9 +72,9 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         actual_param_types = kwargs.get('param_types', {})
 
         # Define the expected query string
-        expected_query = """
+        expected_query = f"""
         SELECT properties, embedding
-        FROM MockNodes
+        FROM {self.mock_graph.node_table}
         WHERE label = @node_label AND embedding IS NOT NULL
         ORDER BY COSINE_DISTANCE(embedding, @query_embedding)
         LIMIT @limit
@@ -105,13 +109,8 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
     def test_from_existing_graph_batching(self, mock_embed_documents):
         """Tests the batching and pagination logic in from_existing_graph."""
         # 1. Setup Mocks
-        mock_graph = MagicMock()
-        mock_graph.node_table = "MockNodes"
-        mock_snapshot = MagicMock()
-        mock_graph._database.snapshot.return_value.__enter__.return_value = mock_snapshot
-
         # Mock the result stream to simulate fetching data in multiple batches
-        mock_snapshot.execute_sql.side_effect = [
+        self.mock_snapshot.execute_sql.side_effect = [
             [
                 (1, "doc", {"text": "Content 1"}),
                 (2, "doc", {"text": "Content 2"}),
@@ -127,7 +126,7 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
 
         # 2. Call the method with empty text_properties to test label-only embedding
         SpannerGraphVectorStore.from_existing_graph(
-            graph=mock_graph,
+            graph=self.mock_graph,
             embedding=embedding_service,
             text_properties=[], # Test label-only embedding
             include_label_in_embedding=True,
@@ -135,9 +134,9 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         )
 
         # 3. Assertions
-        self.assertEqual(mock_snapshot.execute_sql.call_count, 3)
+        self.assertEqual(self.mock_snapshot.execute_sql.call_count, 3)
         self.assertEqual(mock_embed_documents.call_count, 2)
-        self.assertEqual(mock_graph._database.run_in_transaction.call_count, 2)
+        self.assertEqual(self.mock_graph._database.run_in_transaction.call_count, 2)
 
         # Assert content of the first embedding call (should be labels only)
         first_call_args, _ = mock_embed_documents.call_args_list[0]
@@ -146,6 +145,40 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         # Assert content of the second embedding call (should be labels only)
         second_call_args, _ = mock_embed_documents.call_args_list[1]
         self.assertEqual(["person"], second_call_args[0])
+
+    def test_similarity_search_by_vector_across_all_nodes(self):
+        """Test similarity search by vector across all nodes."""
+        # Arrange
+        embedding_service = FakeEmbeddings(size=2)
+        vector_store = SpannerGraphVectorStore(
+            graph=self.mock_graph,
+            embedding=embedding_service,
+            node_label="document",
+            text_properties=["text"],
+        )
+        query_embedding = [1.0, 2.0]
+
+        # Act
+        vector_store.similarity_search_by_vector_across_all_nodes(query_embedding, k=5)
+
+        # Assert
+        self.mock_snapshot.execute_sql.assert_called_once()
+        call_args, call_kwargs = self.mock_snapshot.execute_sql.call_args
+        
+        # Check the query string
+        expected_query = f"""
+        SELECT id, properties, embedding
+        FROM {self.mock_graph.node_table}
+        WHERE embedding IS NOT NULL
+        ORDER BY COSINE_DISTANCE(embedding, @query_embedding)
+        LIMIT @limit
+        """
+        self.assertEqual(call_args[0].strip(), expected_query.strip())
+
+        # Check the parameters
+        self.assertEqual(call_kwargs["params"]["query_embedding"], query_embedding)
+        self.assertEqual(call_kwargs["params"]["limit"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

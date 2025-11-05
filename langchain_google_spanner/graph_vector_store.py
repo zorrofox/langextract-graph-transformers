@@ -148,6 +148,56 @@ class SpannerGraphVectorStore(VectorStore):
 
         return docs
 
+    def similarity_search_by_vector_across_all_nodes(
+        self, embedding: List[float], k: int = 4, **kwargs: Any
+    ) -> List[Document]:
+        """
+        Perform a similarity search by vector across all nodes in the graph,
+        regardless of their label.
+        """
+        query = f"""
+        SELECT id, properties, {self.embedding_property}
+        FROM {self._graph.node_table}
+        WHERE {self.embedding_property} IS NOT NULL
+        ORDER BY COSINE_DISTANCE({self.embedding_property}, @query_embedding)
+        LIMIT @limit
+        """
+
+        params = {
+            "query_embedding": embedding,
+            "limit": k,
+        }
+        param_types = {
+            "query_embedding": spanner.param_types.Array(spanner.param_types.FLOAT64),
+            "limit": spanner.param_types.INT64,
+        }
+
+        docs = []
+        with self._graph._database.snapshot() as snapshot:
+            result_stream = snapshot.execute_sql(
+                query, params=params, param_types=param_types
+            )
+            rows = list(result_stream)
+            if not rows:
+                return []
+
+            for row in rows:
+                node_id, props, emb = row # Unpack id
+                if isinstance(props, str):
+                    try:
+                        props = json.loads(props)
+                    except json.JSONDecodeError:
+                        continue
+                
+                text = " ".join(
+                    str(self._get_value_by_path(props, key) or "") for key in self.text_properties
+                ).strip()
+                
+                metadata = {**props, "id": node_id} # Include id in metadata
+                docs.append(Document(page_content=text, metadata=metadata))
+
+        return docs
+
     @classmethod
     def from_texts(
         cls: Type[SpannerGraphVectorStore],
@@ -186,6 +236,15 @@ class SpannerGraphVectorStore(VectorStore):
         Create a SpannerGraphVectorStore from an existing Spanner graph,
         populating the dedicated embedding column for nodes that are missing it.
         """
+        # Get vector length from embedding service
+        try:
+            vector_length = len(embedding.embed_query("test"))
+        except Exception as e:
+            raise ValueError(f"Could not determine vector length from embedding service: {e}")
+
+        # Ensure schema, including vector index, is created
+        graph._create_or_verify_schema(vector_length=vector_length)
+
         embedding_property = "embedding" # Hardcoded to match schema
         print(f"Starting to populate '{embedding_property}' column for nodes...")
         if node_label:
@@ -243,7 +302,15 @@ class SpannerGraphVectorStore(VectorStore):
             texts_to_embed = []
             valid_nodes_for_embedding = []
             for node in parsed_nodes:
-                text_parts = [str(cls._get_value_by_path(node["properties"], p) or "") for p in text_properties]
+                text_parts = []
+                for p in text_properties:
+                    if p == "id":
+                        text_parts.append(str(node["node_id"]))
+                    elif p == "label":
+                        text_parts.append(str(node["label"]))
+                    else:
+                        text_parts.append(str(cls._get_value_by_path(node["properties"], p) or ""))
+                
                 content = " ".join(text_parts).strip()
 
                 if include_label_in_embedding:

@@ -102,5 +102,88 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
         self.assertIn(results[0].page_content, docs_to_add)
 
 
+        @patch("langchain_community.embeddings.FakeEmbeddings.embed_query")
+        @patch("langchain_community.embeddings.FakeEmbeddings.embed_documents")
+        def test_similarity_search_across_all_nodes(self, mock_embed_documents, mock_embed_query):
+            """Tests similarity search across nodes with different labels."""
+            # 1. Setup embeddings
+            embedding_service = FakeEmbeddings(size=2) # Small embedding for test
+    
+            # Define predictable embeddings
+            query_emb = [1.0, 0.0] # Query for cat_doc and cat_animal
+            cat_doc_emb = [1.0, 0.0] # Perfect match
+            dog_doc_emb = [0.0, 1.0] # Orthogonal
+            cat_animal_emb = [0.9, 0.1] # Close to cat_doc
+            dog_breed_emb = [0.1, 0.9] # Close to dog_doc
+    
+            # 2. Add nodes with different labels
+            nodes_to_add = [
+                Node(id="cat_doc", type="document", properties={"text": "A document about a cat."}),
+                Node(id="dog_doc", type="document", properties={"text": "A document about a dog."}),
+                Node(id="cat_animal", type="animal", properties={"text": "A furry creature that purrs."}),
+                Node(id="dog_breed", type="animal", properties={"text": "A loyal companion."}),
+            ]
+            # Sort nodes by ID to match the ORDER BY id in from_existing_graph
+            nodes_to_add.sort(key=lambda node: node.id)
+    
+            source_doc = Document(page_content="Integration test data source.")
+            graph_doc = GraphDocument(nodes=nodes_to_add, relationships=[], source=source_doc)
+            self.graph.add_graph_documents([graph_doc])
+    
+            # Get the nodes from the database in the same order as _populate_embeddings
+            with self.graph._database.snapshot() as snapshot:
+                results = snapshot.execute_sql(f"SELECT id, properties FROM {self.graph.node_table} ORDER BY id")
+                db_nodes = list(results)
+    
+            # Create the mock embeddings based on the order of the nodes in the database
+            mock_embeddings = []
+            for node_id, props in db_nodes:
+                if props['text'] == 'A document about a cat.':
+                    mock_embeddings.append(cat_doc_emb)
+                elif props['text'] == 'A document about a dog.':
+                    mock_embeddings.append(dog_doc_emb)
+                elif props['text'] == 'A furry creature that purrs.':
+                    mock_embeddings.append(cat_animal_emb)
+                elif props['text'] == 'A loyal companion.':
+                    mock_embeddings.append(dog_breed_emb)
+            
+            mock_embed_query.return_value = query_emb
+            mock_embed_documents.return_value = mock_embeddings
+    
+            # 3. Use from_existing_graph to populate embeddings
+            # Embed based on node IDs for predictable mocking
+            vector_store = SpannerGraphVectorStore.from_existing_graph(
+                graph=self.graph,
+                embedding=embedding_service,
+                text_properties=['id', 'text'], # Embed based on ID and text for predictable mocking
+            )
+    
+            # 4. Perform a similarity search for a query related to one of the nodes
+            query_text = "A purring feline." # This text is not used for embedding, only to trigger mock_embed_query
+            results = vector_store.similarity_search_by_vector_across_all_nodes(
+                embedding=query_emb, # Pass the pre-defined query embedding
+                k=2 # Expect 2 results
+            )
+    
+            # 5. Assertions
+            self.assertEqual(len(results), 2)
+            
+            # The top result should be cat_doc, second should be cat_animal
+            result_ids = {doc.metadata['id'] for doc in results}
+            
+            # Get the hashed IDs for assertion using the graph's internal hashing logic
+            # The nodes_to_add list is already sorted by ID
+            hashed_cat_doc_id = self.graph._get_int64_hash(f"{nodes_to_add[0].type.lower()}-{nodes_to_add[0].id.lower()}")
+            hashed_cat_animal_id = self.graph._get_int64_hash(f"{nodes_to_add[2].type.lower()}-{nodes_to_add[2].id.lower()}")
+    
+            self.assertTrue(hashed_cat_doc_id in result_ids)
+            self.assertTrue(hashed_cat_animal_id in result_ids)
+            # Check that the content is correctly constructed
+            for doc in results:
+                if doc.metadata['id'] == 'cat_doc':
+                    self.assertIn("A document about a cat.", doc.page_content)
+                if doc.metadata['id'] == 'cat_animal':
+                    self.assertIn("A furry creature that purrs.", doc.page_content)
+
 if __name__ == "__main__":
     unittest.main()
