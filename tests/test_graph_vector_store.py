@@ -146,39 +146,6 @@ class TestSpannerGraphVectorStore(unittest.TestCase):
         second_call_args, _ = mock_embed_documents.call_args_list[1]
         self.assertEqual(["person"], second_call_args[0])
 
-    def test_similarity_search_by_vector_across_all_nodes(self):
-        """Test similarity search by vector across all nodes."""
-        # Arrange
-        embedding_service = FakeEmbeddings(size=2)
-        vector_store = SpannerGraphVectorStore(
-            graph=self.mock_graph,
-            embedding=embedding_service,
-            node_label="document",
-            text_properties=["text"],
-        )
-        query_embedding = [1.0, 2.0]
-
-        # Act
-        vector_store.similarity_search_by_vector_across_all_nodes(query_embedding, k=5)
-
-        # Assert
-        self.mock_snapshot.execute_sql.assert_called_once()
-        call_args, call_kwargs = self.mock_snapshot.execute_sql.call_args
-        
-        # Check the query string
-        expected_query = f"""
-        SELECT id, properties, embedding
-        FROM {self.mock_graph.node_table}
-        WHERE embedding IS NOT NULL
-        ORDER BY COSINE_DISTANCE(embedding, @query_embedding)
-        LIMIT @limit
-        """
-        self.assertEqual(call_args[0].strip(), expected_query.strip())
-
-        # Check the parameters
-        self.assertEqual(call_kwargs["params"]["query_embedding"], query_embedding)
-        self.assertEqual(call_kwargs["params"]["limit"], 5)
-
 
 if __name__ == "__main__":
     unittest.main()

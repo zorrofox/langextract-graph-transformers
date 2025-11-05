@@ -148,56 +148,6 @@ class SpannerGraphVectorStore(VectorStore):
 
         return docs
 
-    def similarity_search_by_vector_across_all_nodes(
-        self, embedding: List[float], k: int = 4, **kwargs: Any
-    ) -> List[Document]:
-        """
-        Perform a similarity search by vector across all nodes in the graph,
-        regardless of their label.
-        """
-        query = f"""
-        SELECT id, properties, {self.embedding_property}
-        FROM {self._graph.node_table}
-        WHERE {self.embedding_property} IS NOT NULL
-        ORDER BY COSINE_DISTANCE({self.embedding_property}, @query_embedding)
-        LIMIT @limit
-        """
-
-        params = {
-            "query_embedding": embedding,
-            "limit": k,
-        }
-        param_types = {
-            "query_embedding": spanner.param_types.Array(spanner.param_types.FLOAT64),
-            "limit": spanner.param_types.INT64,
-        }
-
-        docs = []
-        with self._graph._database.snapshot() as snapshot:
-            result_stream = snapshot.execute_sql(
-                query, params=params, param_types=param_types
-            )
-            rows = list(result_stream)
-            if not rows:
-                return []
-
-            for row in rows:
-                node_id, props, emb = row # Unpack id
-                if isinstance(props, str):
-                    try:
-                        props = json.loads(props)
-                    except json.JSONDecodeError:
-                        continue
-                
-                text = " ".join(
-                    str(self._get_value_by_path(props, key) or "") for key in self.text_properties
-                ).strip()
-                
-                metadata = {**props, "id": node_id} # Include id in metadata
-                docs.append(Document(page_content=text, metadata=metadata))
-
-        return docs
-
     @classmethod
     def from_texts(
         cls: Type[SpannerGraphVectorStore],

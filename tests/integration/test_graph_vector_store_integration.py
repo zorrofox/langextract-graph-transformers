@@ -160,7 +160,7 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
     
             # 4. Perform a similarity search for a query related to one of the nodes
             query_text = "A purring feline." # This text is not used for embedding, only to trigger mock_embed_query
-            results = vector_store.similarity_search_by_vector_across_all_nodes(
+            results = vector_store.similarity_search(
                 embedding=query_emb, # Pass the pre-defined query embedding
                 k=2 # Expect 2 results
             )
