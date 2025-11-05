@@ -236,15 +236,6 @@ class SpannerGraphVectorStore(VectorStore):
         Create a SpannerGraphVectorStore from an existing Spanner graph,
         populating the dedicated embedding column for nodes that are missing it.
         """
-        # Get vector length from embedding service
-        try:
-            vector_length = len(embedding.embed_query("test"))
-        except Exception as e:
-            raise ValueError(f"Could not determine vector length from embedding service: {e}")
-
-        # Ensure schema, including vector index, is created
-        graph._create_or_verify_schema(vector_length=vector_length)
-
         embedding_property = "embedding" # Hardcoded to match schema
         print(f"Starting to populate '{embedding_property}' column for nodes...")
         if node_label:
