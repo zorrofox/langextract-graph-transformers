@@ -167,5 +167,50 @@ class TestSpannerSchemalessGraphStore(unittest.TestCase):
             self.assertEqual(source_info["page_content"], "This is the source.")
             self.assertEqual(source_info["metadata"]["author"], "Gemini")
 
+    @patch("google.cloud.spanner_v1.Client")
+    def test_create_schema_with_vector_index_ddl(self, MockSpannerClient):
+        """Tests that the correct DDL is generated when vector_length is provided."""
+        mock_client, mock_database, mock_snapshot = self._get_mock_db(MockSpannerClient)
+        mock_ddl_op = MagicMock()
+        mock_database.update_ddl.return_value = mock_ddl_op
+        
+        # Simulate no tables, no index, no graph existing
+        mock_snapshot.execute_sql.return_value = []
+
+        # Re-initialize the graph to trigger _create_or_verify_schema
+        graph_store = SpannerSchemalessGraph(
+            instance_id="test-instance", 
+            database_id="test-db", 
+            client=mock_client,
+            node_table="MyNodes",
+            edge_table="MyEdges",
+            graph_name="MyGraph"
+        )
+        
+        # Manually call the method we want to test, with a vector_length
+        graph_store._create_or_verify_schema(vector_length=768)
+
+        # Capture all DDL statements from all calls to update_ddl
+        all_ddl_statements = []
+        for call in mock_database.update_ddl.call_args_list:
+            # The argument is passed as a keyword argument `ddl_statements`
+            all_ddl_statements.extend(call.kwargs['ddl_statements'])
+
+        # Define expected DDLs
+        expected_create_table = """CREATE TABLE MyNodes (
+                      id INT64 NOT NULL,
+                      label STRING(MAX),
+                      properties JSON,
+                      embedding ARRAY<FLOAT64>(vector_length=>768)
+                    ) PRIMARY KEY (id)"""
+        
+        expected_create_index = "CREATE VECTOR INDEX MyNodes_embedding_idx ON MyNodes(embedding) OPTIONS (distance_type='COSINE')"
+
+        # Normalize and check for presence
+        normalized_actuals = [" ".join(s.split()) for s in all_ddl_statements]
+        
+        self.assertIn(" ".join(expected_create_table.split()), normalized_actuals)
+        self.assertIn(" ".join(expected_create_index.split()), normalized_actuals)
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,11 +45,14 @@ class SpannerSchemalessGraph:
         sha256_hash = hashlib.sha256(input_string.encode('utf-8')).digest()
         return int.from_bytes(sha256_hash[:8], byteorder='big', signed=True)
 
-    def _create_or_verify_schema(self) -> None:
-        """Checks for and creates the tables and property graph based on the official template."""
+    def _create_or_verify_schema(self, vector_length: Optional[int] = None) -> None:
+        """Checks for and creates the tables, index, and property graph."""
         try:
-            table_ddls = []
+            ddl_statements = []
+            index_name = f"{self.node_table}_embedding_idx"
+
             with self._database.snapshot() as snapshot:
+                # Check for tables
                 results = snapshot.execute_sql(
                     f"""SELECT t.table_name FROM information_schema.tables AS t
                         WHERE t.table_catalog = '' AND t.table_schema = '' 
@@ -57,34 +60,58 @@ class SpannerSchemalessGraph:
                 )
                 existing_tables = {row[0] for row in results}
 
+            with self._database.snapshot() as snapshot:
+                # Check for index
+                index_results = snapshot.execute_sql(
+                    f"SELECT 1 FROM information_schema.indexes WHERE index_name = '{index_name}'"
+                )
+                index_exists = bool(list(index_results))
+
             if self.node_table not in existing_tables:
-                table_ddls.append(f"""CREATE TABLE {self.node_table} (
+                table_ddl = f"""CREATE TABLE {self.node_table} (
                       id INT64 NOT NULL,
-                                  label STRING(MAX),
-                                  properties JSON,
-                                  embedding ARRAY<FLOAT64>,
-                    ) PRIMARY KEY (id)""")
+                      label STRING(MAX),
+                      properties JSON,
+                      embedding ARRAY<FLOAT64>"""
+                if vector_length:
+                    table_ddl += f"(vector_length=>{vector_length})"
+                
+                table_ddl += """
+                    ) PRIMARY KEY (id)"""
+                ddl_statements.append(table_ddl)
 
             if self.edge_table not in existing_tables:
-                 table_ddls.append(f"""CREATE TABLE {self.edge_table} (
+                 ddl_statements.append(f"""CREATE TABLE {self.edge_table} (
                       id INT64 NOT NULL,
                       dest_id INT64 NOT NULL,
                       edge_id INT64 NOT NULL,
                       label STRING(MAX),
-                      properties JSON,
+                      properties JSON
                     ) PRIMARY KEY (id, dest_id, edge_id),
                       INTERLEAVE IN PARENT {self.node_table} ON DELETE CASCADE""")
             
-            if table_ddls:
-                op_tables = self._database.update_ddl(ddl_statements=table_ddls)
+            # Run table DDLs first if any
+            if ddl_statements:
+                op_tables = self._database.update_ddl(ddl_statements=ddl_statements)
                 op_tables.result() # Wait for table creation to complete
+                ddl_statements = [] # Reset for next DDL operations
+                # After creating tables, they exist for the next checks
+                existing_tables.add(self.node_table)
+                existing_tables.add(self.edge_table)
+
+            # Create index if the node table exists but the index doesn't
+            if self.node_table in existing_tables and not index_exists and vector_length:
+                ddl_statements.append(
+                    f"CREATE VECTOR INDEX {index_name} ON {self.node_table}(embedding) OPTIONS (distance_type='COSINE')"
+                )
 
             with self._database.snapshot() as snapshot:
+                # Create graph if it doesn't exist
                 graph_results = snapshot.execute_sql(
                     f"SELECT 1 FROM information_schema.property_graphs WHERE PROPERTY_GRAPH_NAME = '{self.graph_name}'"
                 )
                 if not list(graph_results):
-                    graph_ddl = f"""CREATE PROPERTY GRAPH {self.graph_name}
+                    ddl_statements.append(f"""CREATE PROPERTY GRAPH {self.graph_name}
                           NODE TABLES (
                             {self.node_table}
                               DYNAMIC LABEL (label)
@@ -96,9 +123,12 @@ class SpannerSchemalessGraph:
                               DESTINATION KEY (dest_id) REFERENCES {self.node_table}(id)
                               DYNAMIC LABEL (label)
                               DYNAMIC PROPERTIES (properties)
-                          )"""
-                    op_graph = self._database.update_ddl(ddl_statements=[graph_ddl])
-                    op_graph.result() # Wait for graph creation to complete
+                          )""")
+            
+            # Run remaining DDLs (index, graph)
+            if ddl_statements:
+                op_final = self._database.update_ddl(ddl_statements=ddl_statements)
+                op_final.result()
 
         except Exception as e:
             print(f"An error occurred during schema verification/creation: {e}")
