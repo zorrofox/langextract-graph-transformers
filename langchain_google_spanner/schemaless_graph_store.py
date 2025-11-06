@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List, Optional
+import hashlib
+
+from google.cloud.spanner_v1 import Client, JsonObject
+from google.cloud.spanner_v1.database import Database
+from google.cloud.spanner_v1.pool import AbstractSessionPool
+from google.cloud.spanner_v1.transaction import Transaction
+
+from langchain_core.documents import Document
+from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
+
+class SpannerSchemalessGraph:
+    """A graph store for Google Cloud Spanner using a schema-less, high-performance data model."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        database_id: str,
+        node_table: str = "GraphNode",
+        edge_table: str = "GraphEdge",
+        graph_name: str = "FinGraph",
+        project_id: Optional[str] = None,
+        client: Optional[Client] = None,
+        pool: Optional[AbstractSessionPool] = None,
+    ):
+        self._client = client or Client(project=project_id)
+        self._instance_id = instance_id
+        self._database_id = database_id
+        self.node_table = node_table
+        self.edge_table = edge_table
+        self.graph_name = graph_name
+
+        self._database = self._client.instance(self._instance_id).database(
+            self._database_id,
+            pool=pool,
+        )
+        
+        self._create_or_verify_schema()
+
+    def _get_int64_hash(self, input_string: str) -> int:
+        """Creates a deterministic 64-bit integer hash for a given string."""
+        sha256_hash = hashlib.sha256(input_string.encode('utf-8')).digest()
+        return int.from_bytes(sha256_hash[:8], byteorder='big', signed=True)
+
+    def _create_or_verify_schema(self, vector_length: Optional[int] = None) -> None:
+        """Checks for and creates the tables, index, and property graph."""
+        try:
+            ddl_statements = []
+            index_name = f"{self.node_table}_embedding_idx"
+
+            with self._database.snapshot() as snapshot:
+                # Check for tables
+                results = snapshot.execute_sql(
+                    f"""SELECT t.table_name FROM information_schema.tables AS t
+                        WHERE t.table_catalog = '' AND t.table_schema = '' 
+                        AND t.table_name IN ('{self.node_table}', '{self.edge_table}')"""
+                )
+                existing_tables = {row[0] for row in results}
+
+            with self._database.snapshot() as snapshot:
+                # Check for index
+                index_results = snapshot.execute_sql(
+                    f"SELECT 1 FROM information_schema.indexes WHERE index_name = '{index_name}'"
+                )
+                index_exists = bool(list(index_results))
+
+            if self.node_table not in existing_tables:
+                table_ddl = f"""CREATE TABLE {self.node_table} (
+                      id INT64 NOT NULL,
+                      label STRING(MAX),
+                      properties JSON,
+                      embedding ARRAY<FLOAT64>"""
+                if vector_length:
+                    table_ddl += f"(vector_length=>{vector_length})"
+                
+                table_ddl += """
+                    ) PRIMARY KEY (id)"""
+                ddl_statements.append(table_ddl)
+
+            if self.edge_table not in existing_tables:
+                 ddl_statements.append(f"""CREATE TABLE {self.edge_table} (
+                      id INT64 NOT NULL,
+                      dest_id INT64 NOT NULL,
+                      edge_id INT64 NOT NULL,
+                      label STRING(MAX),
+                      properties JSON
+                    ) PRIMARY KEY (id, dest_id, edge_id),
+                      INTERLEAVE IN PARENT {self.node_table} ON DELETE CASCADE""")
+            
+            # Run table DDLs first if any
+            if ddl_statements:
+                op_tables = self._database.update_ddl(ddl_statements=ddl_statements)
+                op_tables.result() # Wait for table creation to complete
+                ddl_statements = [] # Reset for next DDL operations
+                # After creating tables, they exist for the next checks
+                existing_tables.add(self.node_table)
+                existing_tables.add(self.edge_table)
+
+            # Create index if the node table exists but the index doesn't
+            if self.node_table in existing_tables and not index_exists and vector_length:
+                ddl_statements.append(
+                    f"CREATE VECTOR INDEX {index_name} ON {self.node_table}(embedding) OPTIONS (distance_type='COSINE')"
+                )
+
+            with self._database.snapshot() as snapshot:
+                # Create graph if it doesn't exist
+                graph_results = snapshot.execute_sql(
+                    f"SELECT 1 FROM information_schema.property_graphs WHERE PROPERTY_GRAPH_NAME = '{self.graph_name}'"
+                )
+                if not list(graph_results):
+                    ddl_statements.append(f"""CREATE PROPERTY GRAPH {self.graph_name}
+                          NODE TABLES (
+                            {self.node_table}
+                              DYNAMIC LABEL (label)
+                              DYNAMIC PROPERTIES (properties)
+                          )
+                          EDGE TABLES (
+                            {self.edge_table}
+                              SOURCE KEY (id) REFERENCES {self.node_table}(id)
+                              DESTINATION KEY (dest_id) REFERENCES {self.node_table}(id)
+                              DYNAMIC LABEL (label)
+                              DYNAMIC PROPERTIES (properties)
+                          )""")
+            
+            # Run remaining DDLs (index, graph)
+            if ddl_statements:
+                op_final = self._database.update_ddl(ddl_statements=ddl_statements)
+                op_final.result()
+
+        except Exception as e:
+            print(f"An error occurred during schema verification/creation: {e}")
+
+    def _lowercase_keys(self, obj: Any) -> Any:
+        """Recursively converts all keys in a dictionary to lowercase."""
+        if isinstance(obj, dict):
+            return {str(k).lower(): self._lowercase_keys(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._lowercase_keys(elem) for elem in obj]
+        return obj
+
+    def add_graph_documents(
+        self,
+        graph_documents: List[GraphDocument],
+        include_source: bool = False,
+        baseEntityLabel: bool = False,
+        batch_size: int = 1000,
+    ) -> None:
+        """Adds graph documents to the Spanner database in batches to avoid mutation limits."""
+        self._create_or_verify_schema()
+
+        node_mutations = []
+        edge_mutations = []
+
+        # First, gather all mutations from all documents
+        for doc in graph_documents:
+            for node in doc.nodes:
+                node_label = node.type.lower()
+                node_id_str = node.id.lower()
+                node_id = self._get_int64_hash(f"{node_label}-{node_id_str}")
+                
+                properties = self._lowercase_keys(node.properties or {})
+                embedding_data = properties.pop("embedding", None) # 提取 embedding
+
+                if baseEntityLabel:
+                    properties["baseentitylabel"] = True
+                if include_source:
+                    properties["source"] = {
+                        "page_content": doc.source.page_content,
+                        "metadata": self._lowercase_keys(doc.source.metadata),
+                    }
+                node_mutations.append((node_id, node_label, JsonObject(properties), embedding_data))
+
+            for rel in doc.relationships:
+                source_label = rel.source.type.lower()
+                source_id_str = rel.source.id.lower()
+                target_label = rel.target.type.lower()
+                target_id_str = rel.target.id.lower()
+                edge_label = rel.type.lower()
+
+                source_hash_id = self._get_int64_hash(f"{source_label}-{source_id_str}")
+                target_hash_id = self._get_int64_hash(f"{target_label}-{target_id_str}")
+                edge_hash_id = self._get_int64_hash(f"{source_hash_id}-{edge_label}-{target_hash_id}")
+
+                properties = self._lowercase_keys(rel.properties or {})
+                edge_mutations.append(
+                    (
+                        source_hash_id,
+                        target_hash_id,
+                        edge_hash_id,
+                        edge_label,
+                        JsonObject(properties),
+                    )
+                )
+
+        node_columns = ["id", "label", "properties", "embedding"]
+        edge_columns = ["id", "dest_id", "edge_id", "label", "properties"]
+
+        # Batch insert nodes
+        for i in range(0, len(node_mutations), batch_size):
+            node_batch = node_mutations[i : i + batch_size]
+            
+            def insert_node_batch(transaction: Transaction) -> None:
+                transaction.insert_or_update(
+                    table=self.node_table,
+                    columns=node_columns,
+                    values=node_batch,
+                )
+            
+            self._database.run_in_transaction(insert_node_batch)
+
+        # Batch insert edges
+        for i in range(0, len(edge_mutations), batch_size):
+            edge_batch = edge_mutations[i : i + batch_size]
+
+            def insert_edge_batch(transaction: Transaction) -> None:
+                transaction.insert_or_update(
+                    table=self.edge_table,
+                    columns=edge_columns,
+                    values=edge_batch,
+                )
+
+            self._database.run_in_transaction(insert_edge_batch)
+
+    def query(self, query: str) -> List[Dict[str, Any]]:
+        """Executes a GoogleSQL query against the database."""
+        with self._database.snapshot() as snapshot:
+            result_stream = snapshot.execute_sql(query)
+            rows = list(result_stream)
+            if not rows:
+                return []
+            
+            field_names = [field.name for field in result_stream.fields]
+            results = [dict(zip(field_names, row)) for row in rows]
+        return results
+
+    def refresh_schema(self) -> None:
+        self._create_or_verify_schema()
+
+    def cleanup(self) -> None:
+        """Deletes the graph, node, and edge tables safely."""
+        ddl_statements = [
+            f"DROP PROPERTY GRAPH IF EXISTS {self.graph_name}",
+            f"DROP TABLE IF EXISTS {self.edge_table}",
+            f"DROP TABLE IF EXISTS {self.node_table}",
+        ]
+        try:
+            op = self._database.update_ddl(ddl_statements=ddl_statements)
+            op.result(timeout=200)
+        except Exception as e:
+            # This is expected if the resources don't exist, so we don't log it.
+            pass

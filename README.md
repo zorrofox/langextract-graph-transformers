@@ -97,6 +97,66 @@ if graph_documents:
 
 ```
 
+## Spanner Graph Storage (Schema-less)
+
+This project also includes `SpannerSchemalessGraph`, a high-performance graph storage solution for Google Cloud Spanner. It uses a generic, two-table schema (`GraphNode`, `GraphEdge`) with `INTERLEAVE IN PARENT` for physically co-locating related data, providing significant performance benefits for graph queries.
+
+### Storing Graphs in Spanner
+
+Here is an example of the complete end-to-end pipeline: extracting a graph from text and storing it in Spanner.
+
+```python
+import os
+from dotenv import load_dotenv
+from langchain_core.documents import Document
+from langextract_graph_transformers.langextract_graph_transformer import LangExtractGraphTransformer
+from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
+
+# Load environment variables
+# Ensure .env contains: VERTEX_AI_PROJECT_ID, VERTEX_AI_LOCATION, SPANNER_INSTANCE_ID, SPANNER_DATABASE_ID
+load_dotenv()
+
+# 1. Initialize the Spanner Graph Storage
+# This will automatically create the necessary tables (`GraphNode`, `GraphEdge`) and the property graph definition if they don't exist.
+
+instance_id = os.getenv("SPANNER_INSTANCE_ID")
+database_id = os.getenv("SPANNER_DATABASE_ID")
+project_id = os.getenv("VERTEX_AI_PROJECT_ID")
+
+graph_store = SpannerSchemalessGraph(
+    project_id=project_id,
+    instance_id=instance_id,
+    database_id=database_id,
+)
+
+# 2. Initialize the Graph Transformer
+transformer = LangExtractGraphTransformer(
+    project_id=project_id,
+    location=os.getenv("VERTEX_AI_LOCATION", "us-central1"),
+)
+
+# 3. Extract graph from a document
+text_content = ("Microsoft announced its acquisition of Activision Blizzard.")
+document = Document(page_content=text_content)
+graph_documents = transformer.process_documents([document])
+
+# 4. Store the extracted graph in Spanner
+if graph_documents:
+    graph_store.add_graph_documents(graph_documents)
+    print("Graph data successfully stored in Spanner.")
+
+# 5. Query the data back using GoogleSQL
+company_query = "SELECT * FROM GraphNode WHERE label = 'Company'"
+companies = graph_store.query(company_query)
+print("\n--- Companies in Spanner ---")
+for company in companies:
+    print(company)
+
+# 6. Clean up resources (optional)
+# This will delete the tables and the property graph definition.
+# graph_store.cleanup()
+```
+
 ## Running Tests
 
 This project includes both unit and integration tests.

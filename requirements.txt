@@ -1,4 +1,5 @@
-langextract
 langchain-core
 langchain-community
 python-dotenv
+google-cloud-spanner
+google-genai

@@ -1,0 +1,216 @@
+import unittest
+from unittest.mock import patch, MagicMock, ANY, call
+import json
+import hashlib
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from langchain_google_spanner.schemaless_graph_store import SpannerSchemalessGraph
+from langchain_core.documents import Document
+from langchain_community.graphs.graph_document import GraphDocument, Node, Relationship
+from google.cloud.spanner_v1 import JsonObject
+
+class TestSpannerSchemalessGraphStore(unittest.TestCase):
+
+    def _get_mock_db(self, MockSpannerClient):
+        mock_instance = MagicMock()
+        mock_database = MagicMock()
+        mock_snapshot = MagicMock()
+        mock_client = MockSpannerClient.return_value
+        mock_client.instance.return_value = mock_instance
+        mock_instance.database.return_value = mock_database
+        mock_database.snapshot.return_value.__enter__.return_value = mock_snapshot
+        mock_database.run_in_transaction.side_effect = lambda func, *args, **kwargs: func(MagicMock(), *args, **kwargs)
+        return mock_client, mock_database, mock_snapshot
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_initialization_creates_schema(self, MockSpannerClient):
+        """Tests that DDLs are executed if the schema does not exist."""
+        _, mock_database, mock_snapshot = self._get_mock_db(MockSpannerClient)
+        mock_ddl_op = MagicMock()
+        mock_database.update_ddl.return_value = mock_ddl_op
+        mock_snapshot.execute_sql.return_value = []
+
+        SpannerSchemalessGraph(
+            instance_id="test-instance", database_id="test-db", client=MockSpannerClient()
+        )
+
+        self.assertEqual(mock_database.update_ddl.call_count, 2)
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_add_graph_documents_logic(self, MockSpannerClient):
+        """Tests the logic of converting GraphDocuments to Spanner mutations."""
+        mock_client, _, _ = self._get_mock_db(MockSpannerClient)
+        
+        # Bypass schema creation for this test by mocking the method
+        with patch.object(SpannerSchemalessGraph, '_create_or_verify_schema') as mock_create_schema:
+            graph_store = SpannerSchemalessGraph(
+                instance_id="test-instance", database_id="test-db", client=mock_client
+            )
+            mock_create_schema.assert_called_once()
+
+            # Prepare graph documents
+            source_doc = Document(page_content="Source text")
+            node1 = Node(id="Google", type="Company", properties={"country": "USA"})
+            node2 = Node(id="Sundar Pichai", type="Person")
+            relationship = Relationship(source=node1, target=node2, type="IS_CEO_OF", properties={"start_year": 2015})
+            graph_doc = GraphDocument(source=source_doc, nodes=[node1, node2], relationships=[relationship])
+
+            # Mock the transaction to capture the mutations
+            mock_transaction = MagicMock()
+            graph_store._database.run_in_transaction = MagicMock(side_effect=lambda func: func(mock_transaction))
+
+            # Act
+            graph_store.add_graph_documents([graph_doc])
+
+            # Assert
+            # We expect two transactions: one for nodes, one for edges
+            self.assertEqual(graph_store._database.run_in_transaction.call_count, 2)
+            
+            # Check that insert_or_update was called twice (once per transaction)
+            self.assertEqual(mock_transaction.insert_or_update.call_count, 2)
+
+            # Check node mutations
+            node_call = mock_transaction.insert_or_update.call_args_list[0]
+            self.assertEqual(node_call.kwargs['table'], 'GraphNode')
+            self.assertEqual(node_call.kwargs['columns'], ['id', 'label', 'properties', 'embedding'])
+            
+            values = list(node_call.kwargs['values'])
+            self.assertEqual(len(values), 2)
+            
+            google_node_val = next(v for v in values if v[1] == "company")
+            sundar_node_val = next(v for v in values if v[1] == "person")
+
+            self.assertEqual(google_node_val[2]['country'], 'USA')
+            self.assertIsNone(google_node_val[3]) # embedding should be None initially
+            self.assertIsNone(sundar_node_val[3]) # embedding should be None initially
+
+            # Check edge mutations
+            edge_call = mock_transaction.insert_or_update.call_args_list[1]
+            self.assertEqual(edge_call.kwargs['table'], 'GraphEdge')
+            self.assertEqual(edge_call.kwargs['columns'], ['id', 'dest_id', 'edge_id', 'label', 'properties'])
+            
+            edge_values = edge_call.kwargs['values'][0]
+            self.assertEqual(edge_values[0], graph_store._get_int64_hash("company-google"))
+            self.assertEqual(edge_values[1], graph_store._get_int64_hash("person-sundar pichai"))
+            self.assertEqual(edge_values[3], 'is_ceo_of')
+            self.assertEqual(edge_values[4]['start_year'], 2015)
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_add_graph_documents_with_native_types(self, MockSpannerClient):
+        """Tests that native types in properties are passed as dicts, not JSON strings."""
+        mock_client, _, _ = self._get_mock_db(MockSpannerClient)
+        
+        with patch.object(SpannerSchemalessGraph, '_create_or_verify_schema'):
+            graph_store = SpannerSchemalessGraph(
+                instance_id="test-instance", database_id="test-db", client=mock_client
+            )
+
+            node = Node(id="N1", type="Type1", properties={"value": 123, "active": False})
+            graph_doc = GraphDocument(source=Document(page_content=""), nodes=[node], relationships=[])
+
+            mock_transaction = MagicMock()
+            graph_store._database.run_in_transaction = MagicMock(side_effect=lambda func: func(mock_transaction))
+
+            graph_store.add_graph_documents([graph_doc])
+
+            mock_transaction.insert_or_update.assert_called_once()
+            call_kwargs = mock_transaction.insert_or_update.call_args.kwargs
+            
+            passed_values = call_kwargs['values'][0]
+            properties_value = passed_values[2]
+            self.assertIsInstance(properties_value, JsonObject)
+            self.assertEqual(properties_value['value'], 123)
+            self.assertEqual(properties_value['active'], False)
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_add_graph_documents_with_new_options(self, MockSpannerClient):
+        """Tests add_graph_documents with include_source and baseEntityLabel flags."""
+        mock_client, _, _ = self._get_mock_db(MockSpannerClient)
+        
+        with patch.object(SpannerSchemalessGraph, '_create_or_verify_schema'):
+            graph_store = SpannerSchemalessGraph(
+                instance_id="test-instance", database_id="test-db", client=mock_client
+            )
+
+            source_doc = Document(page_content="This is the source.", metadata={"author": "Gemini"})
+            node1 = Node(id="N1", type="T1")
+            graph_doc = GraphDocument(source=source_doc, nodes=[node1], relationships=[])
+
+            mock_transaction = MagicMock()
+            graph_store._database.run_in_transaction = MagicMock(side_effect=lambda func: func(mock_transaction))
+
+            # Act
+            graph_store.add_graph_documents([graph_doc], include_source=True, baseEntityLabel=True)
+
+            # Assert
+            graph_store._database.run_in_transaction.assert_called_once()
+            
+            self.assertGreater(len(mock_transaction.insert_or_update.call_args_list), 0)
+            node_call = mock_transaction.insert_or_update.call_args_list[0]
+            self.assertEqual(node_call.kwargs['table'], 'GraphNode')
+            
+            values = list(node_call.kwargs['values'])
+            self.assertEqual(len(values), 1)
+            
+            node_properties = values[0][2]
+            self.assertIsInstance(node_properties, JsonObject)
+
+            # Check for baseEntityLabel
+            self.assertIn("baseentitylabel", node_properties)
+            self.assertEqual(node_properties["baseentitylabel"], True)
+
+            # Check for source information
+            self.assertIn("source", node_properties)
+            source_info = node_properties["source"]
+            self.assertEqual(source_info["page_content"], "This is the source.")
+            self.assertEqual(source_info["metadata"]["author"], "Gemini")
+
+    @patch("google.cloud.spanner_v1.Client")
+    def test_create_schema_with_vector_index_ddl(self, MockSpannerClient):
+        """Tests that the correct DDL is generated when vector_length is provided."""
+        mock_client, mock_database, mock_snapshot = self._get_mock_db(MockSpannerClient)
+        mock_ddl_op = MagicMock()
+        mock_database.update_ddl.return_value = mock_ddl_op
+        
+        # Simulate no tables, no index, no graph existing
+        mock_snapshot.execute_sql.return_value = []
+
+        # Re-initialize the graph to trigger _create_or_verify_schema
+        graph_store = SpannerSchemalessGraph(
+            instance_id="test-instance", 
+            database_id="test-db", 
+            client=mock_client,
+            node_table="MyNodes",
+            edge_table="MyEdges",
+            graph_name="MyGraph"
+        )
+        
+        # Manually call the method we want to test, with a vector_length
+        graph_store._create_or_verify_schema(vector_length=768)
+
+        # Capture all DDL statements from all calls to update_ddl
+        all_ddl_statements = []
+        for call in mock_database.update_ddl.call_args_list:
+            # The argument is passed as a keyword argument `ddl_statements`
+            all_ddl_statements.extend(call.kwargs['ddl_statements'])
+
+        # Define expected DDLs
+        expected_create_table = """CREATE TABLE MyNodes (
+                      id INT64 NOT NULL,
+                      label STRING(MAX),
+                      properties JSON,
+                      embedding ARRAY<FLOAT64>(vector_length=>768)
+                    ) PRIMARY KEY (id)"""
+        
+        expected_create_index = "CREATE VECTOR INDEX MyNodes_embedding_idx ON MyNodes(embedding) OPTIONS (distance_type='COSINE')"
+
+        # Normalize and check for presence
+        normalized_actuals = [" ".join(s.split()) for s in all_ddl_statements]
+        
+        self.assertIn(" ".join(expected_create_table.split()), normalized_actuals)
+        self.assertIn(" ".join(expected_create_index.split()), normalized_actuals)
+
+if __name__ == "__main__":
+    unittest.main()
