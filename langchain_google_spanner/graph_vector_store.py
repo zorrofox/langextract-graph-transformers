@@ -24,12 +24,10 @@ class SpannerGraphVectorStore(VectorStore):
         self,
         graph: SpannerSchemalessGraph,
         embedding: Embeddings,
-        node_label: Optional[str], # Now optional
         text_properties: List[str],
     ):
         self._graph = graph
         self._embedding = embedding
-        self.node_label = node_label
         self.text_properties = text_properties
         self.embedding_property = "embedding" # Hardcoded to match schema
 
@@ -54,6 +52,7 @@ class SpannerGraphVectorStore(VectorStore):
     def add_texts(
         self,
         texts: Iterable[str],
+        node_label: str,
         metadatas: Optional[List[dict]] = None,
         **kwargs: Any,
     ) -> List[str]:
@@ -79,7 +78,7 @@ class SpannerGraphVectorStore(VectorStore):
                 self.text_properties[0]: text,
                 self.embedding_property: embeddings[i],
             }
-            node = Node(id=node_id, type=self.node_label, properties=properties)
+            node = Node(id=node_id, type=node_label, properties=properties)
             nodes.append(node)
 
         graph_doc = GraphDocument(nodes=nodes, relationships=[])
@@ -88,39 +87,44 @@ class SpannerGraphVectorStore(VectorStore):
         return ids
 
     def similarity_search(
-        self, query: str, k: int = 4, **kwargs: Any
+        self, query: str, 
+        k: int = 4,
+        node_label: Optional[str] = None,
+        **kwargs: Any
     ) -> List[Document]:
         """Run similarity search with the query."""
         embedding = self._embedding.embed_query(query)
         return self.similarity_search_by_vector(embedding, k, **kwargs)
 
     def similarity_search_by_vector(
-        self, embedding: List[float], k: int = 4, **kwargs: Any
+        self, embedding: List[float], k: int = 4, node_label: Optional[str] = None, **kwargs: Any
     ) -> List[Document]:
         """
         Perform a similarity search by vector using Spanner's native vector functions.
+        If node_label is provided, the search is filtered to nodes with that label.
+        Otherwise, the search is performed across all nodes.
         """
-        if not self.node_label:
-            raise ValueError("node_label must be set on the VectorStore for similarity search.")
-
-        query = f"""
+        base_query = f"""
         SELECT properties, {self.embedding_property}
         FROM {self._graph.node_table}
-        WHERE label = @node_label AND {self.embedding_property} IS NOT NULL
-        ORDER BY COSINE_DISTANCE({self.embedding_property}, @query_embedding)
-        LIMIT @limit
         """
-
+        
         params = {
-            "node_label": self.node_label,
             "query_embedding": embedding,
             "limit": k,
         }
         param_types = {
-            "node_label": spanner.param_types.STRING,
             "query_embedding": spanner.param_types.Array(spanner.param_types.FLOAT64),
             "limit": spanner.param_types.INT64,
         }
+
+        where_clauses = [f"{self.embedding_property} IS NOT NULL"]
+        if node_label:
+            where_clauses.append("label = @node_label")
+            params["node_label"] = node_label
+            param_types["node_label"] = spanner.param_types.STRING
+
+        query = f"{base_query} WHERE {' AND '.join(where_clauses)} ORDER BY COSINE_DISTANCE({self.embedding_property}, @query_embedding) LIMIT @limit"
 
         docs = []
         with self._graph._database.snapshot() as snapshot:
@@ -291,6 +295,5 @@ class SpannerGraphVectorStore(VectorStore):
         return cls(
             graph=graph,
             embedding=embedding,
-            node_label=node_label,
             text_properties=text_properties,
         )
