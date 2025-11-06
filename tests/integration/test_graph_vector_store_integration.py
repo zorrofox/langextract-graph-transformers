@@ -94,9 +94,8 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
             self.assertEqual(len(node["embedding"]), 768)
 
         # 6. Perform a similarity search
-        vector_store.node_label = "document"
         query_text = "A feline was resting."
-        results = vector_store.similarity_search(query=query_text, k=1)
+        results = vector_store.similarity_search(query=query_text, k=1, node_label="document")
 
         self.assertEqual(len(results), 1)
         self.assertIn(results[0].page_content, docs_to_add)
@@ -160,10 +159,7 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
     
             # 4. Perform a similarity search for a query related to one of the nodes
             query_text = "A purring feline." # This text is not used for embedding, only to trigger mock_embed_query
-            results = vector_store.similarity_search(
-                embedding=query_emb, # Pass the pre-defined query embedding
-                k=2 # Expect 2 results
-            )
+            results = vector_store.similarity_search(query=query_text, k=2)
     
             # 5. Assertions
             self.assertEqual(len(results), 2)
@@ -184,6 +180,5 @@ class TestGraphVectorStoreIntegration(unittest.TestCase):
                     self.assertIn("A document about a cat.", doc.page_content)
                 if doc.metadata['id'] == 'cat_animal':
                     self.assertIn("A furry creature that purrs.", doc.page_content)
-
 if __name__ == "__main__":
     unittest.main()
